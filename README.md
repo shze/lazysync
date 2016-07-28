@@ -16,13 +16,11 @@ Syncs two folders lazily.
 
 ## Status
 
-* Syncing works for folders and files.
+* Syncing should work for folders and files, including symlinks.
+  * Symlinks with a target within 'remote' or 'local' should be synced as symlinks with targets within 
+    'local' or 'remote'; this also syncs dead symlinks.
 * Known problems:
-  * Symlinks within the 'remote' folder are not synced to be within the 'local' folder. All local files 
-    and symlinks will point to the 'remote' folder.
-    E.g. remote/file <- remote/link will not be remote/file <- local/file <- local/link, but instead
-    remote/file <- local/file and remote/link <- local/link.
-  * Dead symlinks cause exceptions.
+  * None, except needs more testing.
 
 ## To Do
 
@@ -32,6 +30,9 @@ Syncs two folders lazily.
 
 * Syncing lazily works by creating symlinks in the 'local' folder that point to the corresponding file in 
   the 'remote' folder. This avoids downloading files whoses content is not needed (yet).
+* Symlinks that have a target are treated as special case and a remote/file <- remote/link will be synced 
+  as remote/file <- local/file <- local/link and not as remote/file <- local/file and 
+  remote/link <- local/link.
 * If a file is read in the 'local' folder and therefore downloaded, the symlink is replaced with a copy of 
   the file contents until it is changed in the 'remote' folder.
 

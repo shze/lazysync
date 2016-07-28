@@ -115,7 +115,7 @@ class lazysync(pyinotify.ProcessEvent):
       for relative_path in folder_diff:
         self.queue.append(synctask(os.path.join(self.config['remote'], relative_path), pyinotify.IN_CREATE | pyinotify.IN_ISDIR))
       for relative_path in file_diff:
-        self.queue.append(synctask(os.path.join(self.config['remote'], relative_path), pyinotify.IN_CLOSE_WRITE))
+        self.queue.append(synctask(os.path.join(self.config['remote'], relative_path), pyinotify.IN_CREATE))
       self.process_queue()
       if(len(folder_diff) + len(file_diff) == 0 or self.config['dry-run']):
         break
@@ -131,7 +131,7 @@ class lazysync(pyinotify.ProcessEvent):
       for relative_path in folder_diff:
         self.queue.append(synctask(os.path.join(self.config['local'], relative_path), pyinotify.IN_CREATE | pyinotify.IN_ISDIR))
       for relative_path in file_diff:
-        self.queue.append(synctask(os.path.join(self.config['local'], relative_path), pyinotify.IN_CLOSE_WRITE))
+        self.queue.append(synctask(os.path.join(self.config['local'], relative_path), pyinotify.IN_CREATE))
       self.process_queue()
       if(len(folder_diff) + len(file_diff) == 0 or self.config['dry-run']):
         break
@@ -184,33 +184,63 @@ class lazysync(pyinotify.ProcessEvent):
     logger.info("lazysync::action_local_create_modify_file() relative_path='%s'", relative_path)
     remote_path = os.path.join(self.config['remote'], relative_path)
     local_path = os.path.join(self.config['local'], relative_path)
-    if(files_identical(remote_path, local_path)):
-      logger.info("lazysync::action_local_create_modify_file() remote and local files are identical, no need to modify local path.")
-      return 
-    if(self.config['dry-run']):
-      return 
-    if(os.path.exists(remote_path)):
-      os.remove(remote_path) # will trigger delete
-    shutil.copy2(local_path, remote_path) # will trigger create and modify
-    # TODO update current local storage size
+
+    # symlinks with target within local
+    if(os.path.islink(local_path) and os.path.realpath(local_path).startswith(self.config['local'])):
+      logger.info("lazysync::action_local_create_modify_file() local path is a symlink within local, creating relative symlink in remote.")
+      if(self.config['dry-run']):
+        return 
+      if(os.path.exists(remote_path)):
+        os.remove(remote_path)
+      local_link_target = os.path.realpath(local_path)
+      relative_link_target = os.path.relpath(local_link_target, self.config['local'])
+      os.symlink(relative_link_target, remote_path)
+    
+    # all other files and symlinks
+    else:
+      logger.info("lazysync::action_local_create_modify_file() local path is not a symlink within local, uploading local path.")
+      if(files_identical(remote_path, local_path)):
+        logger.info("lazysync::action_local_create_modify_file() remote and local files are identical, no need to modify local path.")
+        return 
+      if(self.config['dry-run']):
+        return 
+      if(os.path.exists(remote_path)):
+        os.remove(remote_path) # will trigger delete
+      shutil.copy2(local_path, remote_path) # will trigger create and modify
+      # TODO update current local storage size
 
   # file: symlink
   def action_remote_create_modify_file(self, relative_path):
     logger.info("lazysync::action_remote_create_modify_file() relative_path='%s'", relative_path)
     remote_path = os.path.join(self.config['remote'], relative_path)
     local_path = os.path.join(self.config['local'], relative_path)
-    if(os.path.islink(local_path)): # ignore if local file is symlink, b/c it automatically has the modifications
-      logger.info("lazysync::action_remote_create_modify_file() local path is symlink, no need to modify local path.")
-      return 
-    if(files_identical(remote_path, local_path)):
-      logger.info("lazysync::action_remote_create_modify_file() remote and local files are identical, no need to modify local path.")
-      return 
-    if(self.config['dry-run']):
-      return 
-    if(os.path.exists(local_path)):
-      os.remove(local_path)
-    os.symlink(remote_path, local_path)
-    # TODO update current local storage size
+    
+    # symlinks with target within remote
+    if(os.path.islink(remote_path) and os.path.realpath(remote_path).startswith(self.config['remote'])):
+      logger.info("lazysync::action_remote_create_modify_file() remote path is a symlink within remote, creating relative symlink in local.")
+      if(self.config['dry-run']):
+        return 
+      if(os.path.exists(local_path)):
+        os.remove(local_path)
+      remote_link_target = os.path.realpath(remote_path)
+      relative_link_target = os.path.relpath(remote_link_target, self.config['remote'])
+      os.symlink(relative_link_target, local_path)
+    
+    # all other files and symlinks
+    else:
+      logger.info("lazysync::action_remote_create_modify_file() remote path is not a symlink within remote, creating symlink local -> remote.")
+      if(os.path.islink(local_path)): # ignore if local file is symlink, b/c it automatically has the modifications
+        logger.info("lazysync::action_remote_create_modify_file() local path is symlink, no need to modify local path.")
+        return 
+      if(files_identical(remote_path, local_path)):
+        logger.info("lazysync::action_remote_create_modify_file() remote and local files are identical, no need to modify local path.")
+        return 
+      if(self.config['dry-run']):
+        return 
+      if(os.path.exists(local_path)):
+        os.remove(local_path)
+      os.symlink(remote_path, local_path)
+      # TODO update current local storage size
       
   # dir: rmdir; file: rm
   def action_local_delete(self, relative_path):
@@ -255,13 +285,20 @@ class lazysync(pyinotify.ProcessEvent):
           relative_filename = os.path.relpath(synctask.path, self.config['local'])
           self.action_local_access_file(relative_filename)
     elif(synctask.event_mask & pyinotify.IN_CREATE):
-      if(synctask.event_mask & pyinotify.IN_ISDIR): # ignore files b/c they also trigger IN_CLOSE_WRITE
+      if(synctask.event_mask & pyinotify.IN_ISDIR): 
         if(synctask.path.startswith(self.config['local'])):
           relative_path = os.path.relpath(synctask.path, self.config['local'])
           self.action_local_create_dir(relative_path)
         else:
           relative_path = os.path.relpath(synctask.path, self.config['remote'])
           self.action_remote_create_dir(relative_path)
+      else: # files: symlinks will only trigger IN_CREATE, files will additionally trigger IN_CLOSE_WRITE
+        if(synctask.path.startswith(self.config['local'])):
+          relative_path = os.path.relpath(synctask.path, self.config['local'])
+          self.action_local_create_modify_file(relative_path)
+        else:
+          relative_path = os.path.relpath(synctask.path, self.config['remote'])
+          self.action_remote_create_modify_file(relative_path)
     elif(synctask.event_mask & pyinotify.IN_CLOSE_WRITE):
       if(not synctask.event_mask & pyinotify.IN_ISDIR): # ignore directories
         if(synctask.path.startswith(self.config['local'])): # local file modified
