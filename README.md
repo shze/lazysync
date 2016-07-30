@@ -20,7 +20,7 @@ Syncs two folders lazily.
   * Symlinks with a target within 'remote' or 'local' should be synced as symlinks with targets within 
     'local' or 'remote'; this also syncs dead symlinks.
 * Known problems:
-  * None, except needs more testing.
+  * Downloading does not work and is disabled for now; only symlinks are created.
 
 ## To Do
 

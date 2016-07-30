@@ -63,11 +63,15 @@ def relative_walk(root_folder):
   return folders, files
 
 #
-def files_identical(remote_path, local_path):
-  logger.debug("files_identical() remote_path='%s' local_path='%s'", remote_path, local_path)
-  if(not os.path.exists(remote_path) or not os.path.exists(local_path)):
+def files_identical(path1, path2):
+  logger.debug("files_identical() path1='%s' path2='%s'", path1, path2)
+  if(not os.path.exists(path1) or not os.path.exists(path2)):
     return False
-  return filecmp.cmp(remote_path, local_path)
+  return filecmp.cmp(path1, path2)
+
+#
+def local_is_symlink_to_remote(local_filename, remote_filename):
+  return os.path.islink(local_filename) and os.path.readlink(local_filename) == remote_filename
 
 #
 class synctask:
@@ -120,7 +124,7 @@ class lazysync(pyinotify.ProcessEvent):
       if(len(folder_diff) + len(file_diff) == 0 or self.config['dry-run']):
         break
     # turn on inotify on local
-    self.watch_local = self.wm.add_watch(self.config['local'], self.mask, rec=True)
+    self.watch_local = self.wm.add_watch(self.config['local'], self.mask, rec=True, auto_add=True)
   
   # initialize remote folder, then turn on inotify for it
   def initialize_remote(self):
@@ -136,7 +140,7 @@ class lazysync(pyinotify.ProcessEvent):
       if(len(folder_diff) + len(file_diff) == 0 or self.config['dry-run']):
         break
     # turn on inotify on remote
-    self.watch_remote = self.wm.add_watch(self.config['remote'], self.mask, rec=True)
+    self.watch_remote = self.wm.add_watch(self.config['remote'], self.mask, rec=True, auto_add=True)
     
   # collect inotify events; redefined method from base class
   def process_default(self, event):
@@ -144,18 +148,22 @@ class lazysync(pyinotify.ProcessEvent):
     self.queue.append(synctask(event.pathname, event.mask))
 
   # file: download
-  def action_local_access_file(self, relative_path):
-    logger.info("lazysync::action_local_access_file() relative_path='%s'", relative_path)
+  def action_remote_access_file(self, relative_path):
+    logger.info("lazysync::action_remote_access_file() relative_path='%s'", relative_path)
     if(self.config['dry-run']):
       return 
     local_filename = os.path.join(self.config['local'], relative_path)
     remote_filename = os.path.join(self.config['remote'], relative_path)
-    if(os.path.islink(local_filename)):
-      os.remove(local_filename) # will trigger delete
-      shutil.copy2(remote_filename, local_filename) # will trigger create and modify
+    if(local_is_symlink_to_remote(local_filename, remote_filename)):
+      pass
+      # TODO downloading disabled for now
+      #os.remove(local_filename) # will trigger delete
+      #shutil.copy2(remote_filename, local_filename) # will trigger create and modify
       # TODO update current local storage size
     else:
-      logger.warning("'%s' exists in local dir, but is not symlink! NOT SYNCING!", relative_path)
+      # access to remote could be writing, but if it is we'll also see IN_CLOSE_WRITE for remote/file when it's done
+      # so no need to warn here
+      pass
 
   # dir: mkdir
   def action_local_create_dir(self, relative_path):
@@ -228,8 +236,9 @@ class lazysync(pyinotify.ProcessEvent):
     
     # all other files and symlinks
     else:
-      logger.info("lazysync::action_remote_create_modify_file() remote path is not a symlink within remote, creating symlink local -> remote.")
-      if(os.path.islink(local_path)): # ignore if local file is symlink, b/c it automatically has the modifications
+      logger.info("lazysync::action_remote_create_modify_file() remote path is not a symlink within remote, downloading/symlinking remote path.")
+      # ignore if local file is symlink, b/c it automatically has the modifications
+      if(local_is_symlink_to_remote(local_path, remote_path)):
         logger.info("lazysync::action_remote_create_modify_file() local path is symlink, no need to modify local path.")
         return 
       if(files_identical(remote_path, local_path)):
@@ -240,7 +249,10 @@ class lazysync(pyinotify.ProcessEvent):
       if(os.path.exists(local_path)):
         os.remove(local_path)
       os.symlink(remote_path, local_path)
-      # TODO update current local storage size
+      
+      # if we're not in lazy mode, symlink quickly first, then create an access event to download the file
+      if(not self.config['lazy']):
+        self.queue.append(synctask(os.path.join(self.config['remote'], relative_path), pyinotify.IN_ACCESS))
       
   # dir: rmdir; file: rm
   def action_local_delete(self, relative_path):
@@ -281,9 +293,10 @@ class lazysync(pyinotify.ProcessEvent):
     logger.debug("lazysync::process_event() pathname='%s' mask='%s'", synctask.path, pyinotify.EventsCodes.maskname(synctask.event_mask))
     if(synctask.event_mask & pyinotify.IN_ACCESS):
       if(not synctask.event_mask & pyinotify.IN_ISDIR): # ignore accessing directories
-        if(synctask.path.startswith(self.config['local'])): # ignore access events to the remote folder
-          relative_filename = os.path.relpath(synctask.path, self.config['local'])
-          self.action_local_access_file(relative_filename)
+        # look for remote/file access: if local/file symlinks to remote/file, no IN_ACCESS event is generated for local/file
+        if(synctask.path.startswith(self.config['remote'])): 
+          relative_filename = os.path.relpath(synctask.path, self.config['remote'])
+          self.action_remote_access_file(relative_filename)
     elif(synctask.event_mask & pyinotify.IN_CREATE):
       if(synctask.event_mask & pyinotify.IN_ISDIR): 
         if(synctask.path.startswith(self.config['local'])):
