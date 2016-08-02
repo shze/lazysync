@@ -1,12 +1,12 @@
 from __future__ import print_function
 from collections import deque # implements atomic append() and popleft() that do not require locking
-import signal, argparse, os, sys, pyinotify, time, shutil, filecmp, logging
+import signal, argparse, os, sys, pyinotify, time, shutil, filecmp, logging, datetime
 
 # global variable to check for sigint
 sigint = False 
 # set up logging
 logger = logging.getLogger(os.path.basename(sys.argv[0]))
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
 logger.addHandler(console_handler)
@@ -70,8 +70,14 @@ def files_identical(path1, path2):
   return filecmp.cmp(path1, path2)
 
 #
+def path_or_link_exists(path):
+  logger.debug("path_or_link_exists() path='%s'", path)
+  return os.path.lexists(path)
+
+#
 def local_is_symlink_to_remote(local_filename, remote_filename):
-  return os.path.islink(local_filename) and os.path.readlink(local_filename) == remote_filename
+  logger.debug("local_is_symlink_to_remote() local_filename='%s' remote_filename='%s'", local_filename, remote_filename)
+  return os.path.islink(local_filename) and os.readlink(local_filename) == remote_filename
 
 #
 class synctask:
@@ -89,6 +95,7 @@ class lazysync(pyinotify.ProcessEvent):
     logger.debug("lazysync::__init__()")
     self.config = config
     self.queue = deque()
+    self.file_access = {}
     self.wm = pyinotify.WatchManager()
     self.notifier = pyinotify.ThreadedNotifier(self.wm, self)
     self.notifier.start()
@@ -113,7 +120,6 @@ class lazysync(pyinotify.ProcessEvent):
   def initialize_local(self):
     logger.info("lazysync::initialize_local()")
     # sync remote -> local
-    # TODO split in create symlinks then download for lazy=False?
     while True: # emulate do while loop
       folder_diff, folder_intersect, file_diff, file_intersect = self.sync_one_way(self.config['remote'], self.config['local']) 
       for relative_path in folder_diff:
@@ -149,17 +155,36 @@ class lazysync(pyinotify.ProcessEvent):
 
   # file: download
   def action_remote_access_file(self, relative_path):
-    logger.info("lazysync::action_remote_access_file() relative_path='%s'", relative_path)
+    logger.debug("lazysync::action_remote_access_file() relative_path='%s'", relative_path) 
     if(self.config['dry-run']):
       return 
     local_filename = os.path.join(self.config['local'], relative_path)
     remote_filename = os.path.join(self.config['remote'], relative_path)
     if(local_is_symlink_to_remote(local_filename, remote_filename)):
-      pass
-      # TODO downloading disabled for now
-      #os.remove(local_filename) # will trigger delete
-      #shutil.copy2(remote_filename, local_filename) # will trigger create and modify
-      # TODO update current local storage size
+      if(relative_path in self.file_access.keys()):
+        # one file access event is created every ~160kB read, i.e. count * 160kB is roughly the read amount, at least
+        # when read in a short time (repeatedly calling stat on a file or refreshing your file viewer might create access 
+        # events, but only one; that's why we downweigh accesses here that are older than 10s
+        seconds_since_last_acccess = time.time() - self.file_access[relative_path]['time']
+        old_count_factor = max(0, 1 - seconds_since_last_acccess * 0.1) # becomes zero for accesses older than 10s
+        self.file_access[relative_path]['count'] = 1 + old_count_factor * self.file_access[relative_path]['count']
+        self.file_access[relative_path]['time'] = time.time()
+      else:
+        self.file_access[relative_path] = {'count': 1, 'time': time.time()} # unix time
+        
+      logger.debug("lazysync::action_remote_access_file() file=%s count=%f", relative_path, self.file_access[relative_path]['count'])
+      
+      # download if we're not in lazy mode, or if enough of a file was read; enough is semi-arbitrarily set to 45%, b/c:
+      # * files with <=2 chunks of 160kB will always be downloaded, even on a single access event (small, should be fast)
+      # * larger files will be downloaded after when they reach 45% of the size/160kB in access events
+      if(not self.config['lazy'] or self.file_access[relative_path]['count'] * 160000 > os.path.getsize(remote_filename) * 0.45):
+        logger.info("lazysync::action_remote_access_file() download '%s'", relative_path)
+        self.file_access.pop(relative_path) # remove key from dict
+        os.remove(local_filename) # will trigger delete
+        shutil.copy2(remote_filename, local_filename) # will trigger create and modify
+        logger.info("lazysync::action_remote_access_file() download '%s' finished", relative_path)
+        # TODO update current local storage size
+      
     else:
       # access to remote could be writing, but if it is we'll also see IN_CLOSE_WRITE for remote/file when it's done
       # so no need to warn here
@@ -169,8 +194,8 @@ class lazysync(pyinotify.ProcessEvent):
   def action_local_create_dir(self, relative_path):
     logger.info("lazysync::action_local_create_dir() relative_path='", relative_path, "'")
     remote_path = os.path.join(self.config['remote'], relative_path)
-    if(os.path.exists(remote_path)):
-      logger.info("lazysync::action_local_create_dir() remote path already exists, nothing to do.")
+    if(path_or_link_exists(remote_path)):
+      logger.debug("lazysync::action_local_create_dir() remote path already exists, nothing to do.")
       return
     if(self.config['dry-run']):
       return 
@@ -180,8 +205,8 @@ class lazysync(pyinotify.ProcessEvent):
   def action_remote_create_dir(self, relative_path):
     logger.info("lazysync::action_remote_create_dir() relative_path='%s'", relative_path)
     local_path = os.path.join(self.config['local'], relative_path)
-    if(os.path.exists(local_path)):
-      logger.info("lazysync::action_remote_create_dir() local path already exists, nothing to do.")
+    if(path_or_link_exists(local_path)):
+      logger.debug("lazysync::action_remote_create_dir() local path already exists, nothing to do.")
       return 
     if(self.config['dry-run']):
       return 
@@ -198,7 +223,7 @@ class lazysync(pyinotify.ProcessEvent):
       logger.info("lazysync::action_local_create_modify_file() local path is a symlink within local, creating relative symlink in remote.")
       if(self.config['dry-run']):
         return 
-      if(os.path.exists(remote_path)):
+      if(path_or_link_exists(remote_path)):
         os.remove(remote_path)
       local_link_target = os.path.realpath(local_path)
       relative_link_target = os.path.relpath(local_link_target, self.config['local'])
@@ -212,7 +237,7 @@ class lazysync(pyinotify.ProcessEvent):
         return 
       if(self.config['dry-run']):
         return 
-      if(os.path.exists(remote_path)):
+      if(path_or_link_exists(remote_path)):
         os.remove(remote_path) # will trigger delete
       shutil.copy2(local_path, remote_path) # will trigger create and modify
       # TODO update current local storage size
@@ -228,7 +253,7 @@ class lazysync(pyinotify.ProcessEvent):
       logger.info("lazysync::action_remote_create_modify_file() remote path is a symlink within remote, creating relative symlink in local.")
       if(self.config['dry-run']):
         return 
-      if(os.path.exists(local_path)):
+      if(path_or_link_exists(local_path)):
         os.remove(local_path)
       remote_link_target = os.path.realpath(remote_path)
       relative_link_target = os.path.relpath(remote_link_target, self.config['remote'])
@@ -246,13 +271,14 @@ class lazysync(pyinotify.ProcessEvent):
         return 
       if(self.config['dry-run']):
         return 
-      if(os.path.exists(local_path)):
+      if(path_or_link_exists(local_path)):
         os.remove(local_path)
       os.symlink(remote_path, local_path)
       
       # if we're not in lazy mode, symlink quickly first, then create an access event to download the file
       if(not self.config['lazy']):
-        self.queue.append(synctask(os.path.join(self.config['remote'], relative_path), pyinotify.IN_ACCESS))
+        logger.debug("lazysync::action_remote_create_modify_file() not in lazy mode, create IN_ACCESS event to download")
+        self.queue.append(synctask(os.path.join(self.config['remote'], relative_path), pyinotify.IN_ACCESS)) 
       
   # dir: rmdir; file: rm
   def action_local_delete(self, relative_path):
@@ -260,8 +286,12 @@ class lazysync(pyinotify.ProcessEvent):
     remote_path = os.path.join(self.config['remote'], relative_path)
     local_path = os.path.join(self.config['local'], relative_path)
     # do not delete, if both exist b/c then the delete event is a result of another event/operation
-    if(os.path.exists(remote_path) and os.path.exists(local_path)): 
-      logger.info("lazysync::action_local_delete() both remote and local paths exist, won't delete.")
+    if(path_or_link_exists(remote_path) and path_or_link_exists(local_path)): 
+      logger.debug("lazysync::action_local_delete() both remote and local paths exist, won't delete.")
+      return
+    # check in case the IN_DELETE for local/file is the result of action_remote_delete() deleting local/file
+    if(not path_or_link_exists(remote_path)): 
+      logger.debug("lazysync::action_local_delete() remote path does not exist, won't delete.")
       return
     if(self.config['dry-run']):
       return 
@@ -277,8 +307,12 @@ class lazysync(pyinotify.ProcessEvent):
     remote_path = os.path.join(self.config['remote'], relative_path)
     local_path = os.path.join(self.config['local'], relative_path)
     # do not delete, if both exist b/c then the delete event is a result of another event/operation
-    if(os.path.exists(remote_path) and os.path.exists(local_path)): 
-      logger.info("lazysync::action_local_delete() both remote and local paths exist, won't delete.")
+    if(path_or_link_exists(remote_path) and path_or_link_exists(local_path)): 
+      logger.debug("lazysync::action_local_delete() both remote and local paths exist, won't delete.")
+      return
+    # check in case the IN_DELETE for remote/file is the result of action_local_delete() deleting remote/file
+    if(not path_or_link_exists(local_path)):
+      logger.debug("lazysync::action_remote_delete() local path does not exist, won't delete.")
       return
     if(self.config['dry-run']):
       return 
@@ -331,7 +365,7 @@ class lazysync(pyinotify.ProcessEvent):
   
   #
   def process_queue(self):
-    logger.debug("lazysync::process_queue() len=%d", len(self.queue))
+    logger.info("lazysync::process_queue() len=%d", len(self.queue))
     while(self.queue and not sigint): # check sigint here too to avoid long processing times before exiting
       self.process_event(self.queue.popleft())
 
@@ -351,7 +385,10 @@ if __name__ == "__main__":
   config = merge_two_dicts(get_config(), parse_command_line()) # cmd line second to overwrite default settings in config
   if(config['dry-run']):
     logger.info("__main__() Dry run, NOT syncing any files!")
-  
+
+  # default queu size is 16384 (/proc/sys/fs/inotify/max_queued_events), but it cannot be changed w/o root access;
+  # this leads to queue overflows when syncing large file of ~10GB, even when set to 100k
+  #pyinotify.max_queued_events = 100000  
   sync = lazysync(config)
   sync.initialize_local()
   sync.initialize_remote()

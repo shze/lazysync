@@ -9,7 +9,6 @@ Syncs two folders lazily.
 
 ## Requirements
 
-* Python
 * Pyinotify
 
 ## How to run
@@ -20,7 +19,7 @@ Syncs two folders lazily.
   * Symlinks with a target within 'remote' or 'local' should be synced as symlinks with targets within 
     'local' or 'remote'; this also syncs dead symlinks.
 * Known problems:
-  * Downloading does not work and is disabled for now; only symlinks are created.
+  * None, but more tests are needed.
 
 ## To Do
 
