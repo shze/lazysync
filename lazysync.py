@@ -1,6 +1,6 @@
 from __future__ import print_function
 from collections import deque # implements atomic append() and popleft() that do not require locking
-import signal, argparse, os, sys, pyinotify, time, shutil, filecmp, logging, datetime
+import signal, argparse, os, sys, pyinotify, time, shutil, logging, datetime, filecmp, stat
 
 # global variable to check for sigint
 sigint = False 
@@ -63,11 +63,23 @@ def relative_walk(root_folder):
   return folders, files
 
 #
+def fast_file_cmp(file1, file2):
+  s1 = filecmp._sig(os.stat(file1))
+  s2 = filecmp._sig(os.stat(file2))
+  if s1[0] != stat.S_IFREG or s2[0] != stat.S_IFREG:
+    return False
+  if s1 == s2:
+    return True
+  if s1[1] != s2[1]:
+    return False
+  return True # always shallow, see: stackoverflow.com/questions/23192359/
+
+#
 def files_identical(path1, path2):
   logger.debug("files_identical() path1='%s' path2='%s'", path1, path2)
   if(not os.path.exists(path1) or not os.path.exists(path2)):
     return False
-  return filecmp.cmp(path1, path2)
+  return fast_file_cmp(path1, path2)
 
 #
 def path_or_link_exists(path):
