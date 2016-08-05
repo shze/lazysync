@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 from __future__ import print_function
 from collections import deque # implements atomic append() and popleft() that do not require locking
 import signal, argparse, os, sys, pyinotify, time, shutil, logging, datetime, filecmp, stat
@@ -30,10 +32,10 @@ def get_config():
 def parse_command_line():
   logger.debug("parse_command_line()")
   parser = argparse.ArgumentParser(description = 'Syncs lazily a remote folder and a local folder')
-  parser.add_argument('-r', '--remote', required=True)
-  parser.add_argument('-l', '--local', required=True)
-  parser.add_argument('-d', '--dryrun', action='store_true') # store_true means it's True if the flag is found
-  parser.add_argument('-n', '--nolazy', action='store_true') # store_true means it's True if the flag is found
+  parser.add_argument('-r', '--remote', required = True)
+  parser.add_argument('-l', '--local', required = True)
+  parser.add_argument('-d', '--dryrun', action = 'store_true') # store_true means it's True if the flag is found
+  parser.add_argument('-n', '--nolazy', action = 'store_true') # store_true means it's True if the flag is found
   args = parser.parse_args()
   return {
     'remote': os.path.abspath(args.remote), 
