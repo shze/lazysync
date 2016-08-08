@@ -59,9 +59,9 @@ def relative_walk(root_folder):
   for dirpath, dirnames, filenames in os.walk(root_folder):
     relative_dirpath = os.path.relpath(dirpath, root_folder)
     for dirname in dirnames:
-      folders.add(os.path.join(relative_dirpath, dirname))
+      folders.add(os.path.normpath(os.path.join(relative_dirpath, dirname)))
     for filename in filenames: 
-      files.add(os.path.join(relative_dirpath, filename))
+      files.add(os.path.normpath(os.path.join(relative_dirpath, filename)))
   return folders, files
 
 #
@@ -206,7 +206,7 @@ class lazysync(pyinotify.ProcessEvent):
 
   # dir: mkdir
   def action_local_create_dir(self, relative_path):
-    logger.info("lazysync::action_local_create_dir() relative_path='", relative_path, "'")
+    logger.info("lazysync::action_local_create_dir() relative_path='%s'", relative_path)
     remote_path = os.path.join(self.config['remote'], relative_path)
     if(path_or_link_exists(remote_path)):
       logger.debug("lazysync::action_local_create_dir() remote path already exists, nothing to do.")
