@@ -8,7 +8,7 @@ import signal, argparse, os, sys, pyinotify, time, shutil, logging, datetime, fi
 sigint = False 
 # set up logging
 logger = logging.getLogger(os.path.basename(sys.argv[0]))
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
 logger.addHandler(console_handler)
@@ -389,7 +389,7 @@ class lazysync(pyinotify.ProcessEvent):
     global sigint
     while(not sigint):
       self.process_queue()
-      time.sleep(2) # avoid 100% cpu load and a small delay is tolerable to quit 
+      time.sleep(1.5) # avoid 100% cpu load and a small delay is tolerable to quit 
     self.notifier.stop() # turn off inotify
 
 # main    

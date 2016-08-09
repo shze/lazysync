@@ -30,7 +30,7 @@ path_location = Enum('path_location', 'remote local')
 #
 class synctest_path:
   #
-  def __init__(self, location, name, type, size = None, link_src = None):
+  def __init__(self, location, name, type, size = 0, link_src = None):
     self.location = location
     self.name = name
     self.type = type
@@ -54,11 +54,13 @@ class synctest:
     full_path = os.path.join(self.name, path.location.name, path.name)
     logger.debug("synctest::process_path() full_path=%s", full_path)
     if(path.type == path_type.file):
-      blocksize = min(path.size, 1000000) # ~1MB
+      # dd can write files of length 0 only as blocksize > 0 and count == 0
+      blocksize = min(path.size, 1000000) if path.size > 0 else 1 # ~1MB
       count = path.size / blocksize; # writes exact size for <1MB file size, multiples of 1MB for larger files
-      cmdline = "dd if=/dev/zero of=" + full_path + " bs=" + blocksize + " count=" + count
+      cmdline = "dd if=/dev/zero of=" + full_path + " bs=" + str(blocksize) + " count=" + str(count)
       logger.debug("synctest::process_path() cmdline='%s'", cmdline)
-      subprocess.call(cmdline.split())
+      FNULL = open(os.devnull, 'w')
+      subprocess.call(cmdline.split(), stdout = FNULL, stderr = FNULL)
     elif(path.type == path_type.dir):
       os.makedirs(full_path)
     elif(path.type == path_type.link):
@@ -66,9 +68,9 @@ class synctest:
     elif(path.type == path_type.delete):
       if(os.path.lexists(full_path)):
         if(os.path.isdir(full_path)):
-          os.removedirs(full_path)
-        else:
           shutil.rmtree(full_path)
+        else:
+          os.remove(full_path)
       else:
         logger.info()("synctest::process_path() Cannot delete path '%s', it does not exist!", full_path)
   
@@ -143,28 +145,58 @@ class synctest:
     self.process_paths(self.init_paths)
     cmdline = "python lazysync.py -r ./" + self.name + "/remote/ -l ./" + self.name + "/local/ " + self.cmdlineparams
     logger.debug("synctest::run() cmdline='%s'", cmdline)
-    proc = subprocess.Popen(cmdline.split())
+    proc = subprocess.Popen(cmdline.split(), stdout = subprocess.PIPE, stderr = subprocess.PIPE)
     time.sleep(1)
     self.process_paths(self.sync_paths)
-    time.sleep(1)
+    time.sleep(2)
     proc.terminate()
+    out, err = proc.communicate()
     
     if(self.paths_correct()):
-      logger.info("synctest::run() test=%s SUCCESSFUL", self.name)
-      shutil.rmtree(self.name)
+      logger.info("synctest::run() test %s SUCCESSFUL", self.name)
+      #shutil.rmtree(self.name)
     else:
-      logger.info("synctest::run() test=%s FAILED", self.name)
+      logger.info("synctest::run() test %s FAILED", self.name)
+      for line in out.splitlines():
+        logger.info("synctest::run() lazysync stdout: %s", line)
+      for line in err.splitlines():
+        logger.info("synctest::run() lazysync stderr: %s", line)
   
 # main    
 if __name__ == "__main__":
   logger.debug("__main__()")
   
-  remote_d1 = synctest_path(path_location.remote, "d1", path_type.dir)
-  local_d1 = synctest_path(path_location.local, "d1", path_type.dir)
+  remote_d = synctest_path(path_location.remote, "d", path_type.dir)
+  remote_d_del = synctest_path(path_location.remote, "d", path_type.delete)
+  remote_f = synctest_path(path_location.remote, "f", path_type.file)
+  remote_f_del = synctest_path(path_location.remote, "f", path_type.delete)
+  local_d = synctest_path(path_location.local, "d", path_type.dir)
+  local_d_del = synctest_path(path_location.local, "d", path_type.delete)
+  local_f = synctest_path(path_location.local, "f", path_type.file)
+  local_f_del = synctest_path(path_location.local, "f", path_type.delete)
   
   test_list = []
-  test_list.append(synctest("test1", "", [], [], [])) # empty
-  test_list.append(synctest("test2", "", [remote_d1], [], [remote_d1, local_d1])) # initialize remote/dir
-  test_list.append(synctest("test3", "", [local_d1], [], [remote_d1, local_d1])) # initialize local/dir
+  
+  # lazy mode tests
+  test_list.append(synctest("1", "", [], [], [])) # empty
+  
+  test_list.append(synctest("2", "", [remote_d], [], [remote_d, local_d])) # initialize remote/dir
+  test_list.append(synctest("3", "", [local_d], [], [remote_d, local_d])) # initialize local/dir
+  test_list.append(synctest("4", "", [], [remote_d], [remote_d, local_d])) # create remote/dir
+  test_list.append(synctest("5", "", [], [local_d], [remote_d, local_d])) # create local/dir
+  test_list.append(synctest("6", "", [remote_d], [remote_d_del], [])) # delete remote/dir
+  test_list.append(synctest("7", "", [local_d], [local_d_del], [])) # delete local/dir
+  
+  test_list.append(synctest("8", "", [remote_f], [], [remote_f, local_f])) # initialize remote/file # TODO check for link
+  test_list.append(synctest("9", "", [local_f], [], [remote_f, local_f])) # initialize local/file
+  test_list.append(synctest("10", "", [], [remote_f], [remote_f, local_f])) # create remote/file # TODO check for link
+  test_list.append(synctest("11", "", [], [local_f], [remote_f, local_f])) # create local/file
+  test_list.append(synctest("12", "", [remote_f], [remote_f_del], [])) # delete remote/file
+  test_list.append(synctest("13", "", [local_f], [local_f_del], [])) # delete local/file
+  
+  # non-lazy mode tests
+  
+  # dry-run tests
+  
   for this_test in test_list:
     this_test.run()
