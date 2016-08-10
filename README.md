@@ -10,6 +10,7 @@ Syncs two folders lazily.
 ## Requirements
 
 * Pyinotify
+* Enum34 for testing
 
 ## How to run
 

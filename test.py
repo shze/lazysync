@@ -99,8 +99,15 @@ class synctest:
           logger.debug("synctest::paths_correct() correctly found folder remote/%s", this_path.name)
           remote_folders.remove(this_path.name)
         elif(this_path.name in remote_files):
-          logger.debug("synctest::paths_correct() correctly found file remote/%s", this_path.name)
-          remote_files.remove(this_path.name)
+          if(this_path.type == path_type.link and os.path.islink(full_path)):
+            logger.debug("synctest::paths_correct() correctly found link remote/%s", this_path.name)
+            remote_files.remove(this_path.name)
+          elif(this_path.type == path_type.file and not os.path.islink(full_path)):
+            logger.debug("synctest::paths_correct() correctly found file remote/%s", this_path.name)
+            remote_files.remove(this_path.name)
+          else:
+            logger.info("synctest::paths_correct() found file instead of link or link instead of file remote/%s", this_path.name)
+            return False
         else:
           logger.info("synctest::paths_correct() did not find path remote/%s", this_path.name)
           return False
@@ -109,8 +116,15 @@ class synctest:
           logger.debug("synctest::paths_correct() correctly found folder local/%s", this_path.name)
           local_folders.remove(this_path.name)
         elif(this_path.name in local_files):
-          logger.debug("synctest::paths_correct() correctly found file local/%s", this_path.name)
-          local_files.remove(this_path.name)
+          if(this_path.type == path_type.link and os.path.islink(full_path)):
+            logger.debug("synctest::paths_correct() correctly found link local/%s", this_path.name)
+            local_files.remove(this_path.name)
+          elif(this_path.type == path_type.file and not os.path.islink(full_path)):
+            logger.debug("synctest::paths_correct() correctly found file local/%s", this_path.name)
+            local_files.remove(this_path.name)
+          else:
+            logger.info("synctest::paths_correct() found file instead of link or link instead of file remote/%s", this_path.name)
+            return False
         else:
           logger.info("synctest::paths_correct() did not find path local/%s", this_path.name)
           return False
@@ -154,7 +168,7 @@ class synctest:
     
     if(self.paths_correct()):
       logger.info("synctest::run() test %s SUCCESSFUL", self.name)
-      #shutil.rmtree(self.name)
+      shutil.rmtree(self.name)
     else:
       logger.info("synctest::run() test %s FAILED", self.name)
       for line in out.splitlines():
@@ -174,25 +188,30 @@ if __name__ == "__main__":
   local_d_del = synctest_path(path_location.local, "d", path_type.delete)
   local_f = synctest_path(path_location.local, "f", path_type.file)
   local_f_del = synctest_path(path_location.local, "f", path_type.delete)
+  local_l_to_f = synctest_path(path_location.local, "f", path_type.link)
   
   test_list = []
   
   # lazy mode tests
-  test_list.append(synctest("1", "", [], [], [])) # empty
+  test_list.append(synctest("10", "", [], [], [])) # empty
   
-  test_list.append(synctest("2", "", [remote_d], [], [remote_d, local_d])) # initialize remote/dir
-  test_list.append(synctest("3", "", [local_d], [], [remote_d, local_d])) # initialize local/dir
-  test_list.append(synctest("4", "", [], [remote_d], [remote_d, local_d])) # create remote/dir
-  test_list.append(synctest("5", "", [], [local_d], [remote_d, local_d])) # create local/dir
-  test_list.append(synctest("6", "", [remote_d], [remote_d_del], [])) # delete remote/dir
-  test_list.append(synctest("7", "", [local_d], [local_d_del], [])) # delete local/dir
+  test_list.append(synctest("20", "", [remote_d], [], [remote_d, local_d])) # initialize remote/dir
+  test_list.append(synctest("21", "", [local_d], [], [remote_d, local_d])) # initialize local/dir
+  test_list.append(synctest("22", "", [], [remote_d], [remote_d, local_d])) # create remote/dir
+  test_list.append(synctest("23", "", [], [local_d], [remote_d, local_d])) # create local/dir
+  test_list.append(synctest("24", "", [remote_d], [remote_d_del], [])) # delete remote/dir
+  test_list.append(synctest("25", "", [remote_d], [local_d_del], [])) # delete local/dir
+  test_list.append(synctest("26", "", [local_d], [local_d_del], [])) # delete local/dir
+  test_list.append(synctest("27", "", [local_d], [remote_d_del], [])) # delete remote/dir
   
-  test_list.append(synctest("8", "", [remote_f], [], [remote_f, local_f])) # initialize remote/file # TODO check for link
-  test_list.append(synctest("9", "", [local_f], [], [remote_f, local_f])) # initialize local/file
-  test_list.append(synctest("10", "", [], [remote_f], [remote_f, local_f])) # create remote/file # TODO check for link
-  test_list.append(synctest("11", "", [], [local_f], [remote_f, local_f])) # create local/file
-  test_list.append(synctest("12", "", [remote_f], [remote_f_del], [])) # delete remote/file
-  test_list.append(synctest("13", "", [local_f], [local_f_del], [])) # delete local/file
+  test_list.append(synctest("30", "", [remote_f], [], [remote_f, local_l_to_f])) # initialize remote/file
+  test_list.append(synctest("31", "", [local_f], [], [remote_f, local_f])) # initialize local/file
+  test_list.append(synctest("32", "", [], [remote_f], [remote_f, local_l_to_f])) # create remote/file
+  test_list.append(synctest("33", "", [], [local_f], [remote_f, local_f])) # create local/file
+  test_list.append(synctest("34", "", [remote_f], [remote_f_del], [])) # delete remote/file
+  test_list.append(synctest("35", "", [remote_f], [local_f_del], [])) # delete local/file
+  test_list.append(synctest("36", "", [local_f], [local_f_del], [])) # delete local/file
+  test_list.append(synctest("37", "", [local_f], [remote_f_del], [])) # delete remote/file
   
   # non-lazy mode tests
   
