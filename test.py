@@ -24,7 +24,7 @@ def relative_walk(root_folder):
   return folders, files
 
 # enums for testing
-path_type = Enum('path_type', 'file dir link delete')
+path_type = Enum('path_type', 'file dir link access delete')
 path_location = Enum('path_location', 'remote local')
 
 #
@@ -65,6 +65,10 @@ class synctest:
       os.makedirs(full_path)
     elif(path.type == path_type.link):
       os.symlink(self.link_src, full_path)
+    elif(path.type == path_type.access):
+      logger.debug("synctest::process_path() reading '%s'", full_path)
+      with open(full_path, 'r') as f:
+       f.read()
     elif(path.type == path_type.delete):
       if(os.path.lexists(full_path)):
         if(os.path.isdir(full_path)):
@@ -103,6 +107,7 @@ class synctest:
             logger.debug("synctest::paths_correct() correctly found link remote/%s", this_path.name)
             remote_files.remove(this_path.name)
           elif(this_path.type == path_type.file and not os.path.islink(full_path)):
+            # TODO compare size, contents
             logger.debug("synctest::paths_correct() correctly found file remote/%s", this_path.name)
             remote_files.remove(this_path.name)
           else:
@@ -189,29 +194,43 @@ if __name__ == "__main__":
   local_f = synctest_path(path_location.local, "f", path_type.file)
   local_f_del = synctest_path(path_location.local, "f", path_type.delete)
   local_l_to_f = synctest_path(path_location.local, "f", path_type.link)
+  local_l_to_f_access = synctest_path(path_location.local, "f", path_type.access)
+  
+  remote_f2 = synctest_path(path_location.remote, "f2", path_type.file, 100)
+  local_f2 = synctest_path(path_location.local, "f2", path_type.file, 100)
+  local_l_to_f2 = synctest_path(path_location.local, "f2", path_type.link)
+  local_l_to_f2_access = synctest_path(path_location.local, "f2", path_type.access)
+  
+  local_f2_wrong_size = synctest_path(path_location.local, "f2", path_type.file, 500)
   
   test_list = []
   
   # lazy mode tests
-  test_list.append(synctest("10", "", [], [], [])) # empty
+  test_list.append(synctest("100", "", [], [], [])) # empty
   
-  test_list.append(synctest("20", "", [remote_d], [], [remote_d, local_d])) # initialize remote/dir
-  test_list.append(synctest("21", "", [local_d], [], [remote_d, local_d])) # initialize local/dir
-  test_list.append(synctest("22", "", [], [remote_d], [remote_d, local_d])) # create remote/dir
-  test_list.append(synctest("23", "", [], [local_d], [remote_d, local_d])) # create local/dir
-  test_list.append(synctest("24", "", [remote_d], [remote_d_del], [])) # delete remote/dir
-  test_list.append(synctest("25", "", [remote_d], [local_d_del], [])) # delete local/dir
-  test_list.append(synctest("26", "", [local_d], [local_d_del], [])) # delete local/dir
-  test_list.append(synctest("27", "", [local_d], [remote_d_del], [])) # delete remote/dir
+  test_list.append(synctest("110", "", [remote_d], [], [remote_d, local_d])) # initialize remote/dir
+  test_list.append(synctest("111", "", [local_d], [], [remote_d, local_d])) # initialize local/dir
+  test_list.append(synctest("112", "", [], [remote_d], [remote_d, local_d])) # create remote/dir
+  test_list.append(synctest("113", "", [], [local_d], [remote_d, local_d])) # create local/dir
+  test_list.append(synctest("114", "", [remote_d], [remote_d_del], [])) # delete remote/dir
+  test_list.append(synctest("115", "", [remote_d], [local_d_del], [])) # delete local/dir
+  test_list.append(synctest("116", "", [local_d], [local_d_del], [])) # delete local/dir
+  test_list.append(synctest("117", "", [local_d], [remote_d_del], [])) # delete remote/dir
   
-  test_list.append(synctest("30", "", [remote_f], [], [remote_f, local_l_to_f])) # initialize remote/file
-  test_list.append(synctest("31", "", [local_f], [], [remote_f, local_f])) # initialize local/file
-  test_list.append(synctest("32", "", [], [remote_f], [remote_f, local_l_to_f])) # create remote/file
-  test_list.append(synctest("33", "", [], [local_f], [remote_f, local_f])) # create local/file
-  test_list.append(synctest("34", "", [remote_f], [remote_f_del], [])) # delete remote/file
-  test_list.append(synctest("35", "", [remote_f], [local_f_del], [])) # delete local/file
-  test_list.append(synctest("36", "", [local_f], [local_f_del], [])) # delete local/file
-  test_list.append(synctest("37", "", [local_f], [remote_f_del], [])) # delete remote/file
+  test_list.append(synctest("120", "", [remote_f], [], [remote_f, local_l_to_f])) # initialize remote/file
+  test_list.append(synctest("121", "", [local_f], [], [remote_f, local_f])) # initialize local/file
+  test_list.append(synctest("122", "", [], [remote_f], [remote_f, local_l_to_f])) # create remote/file
+  test_list.append(synctest("123", "", [], [local_f], [remote_f, local_f])) # create local/file
+  test_list.append(synctest("124", "", [remote_f], [remote_f_del], [])) # delete remote/file
+  test_list.append(synctest("125", "", [remote_f], [local_f_del], [])) # delete local/file
+  test_list.append(synctest("126", "", [local_f], [local_f_del], [])) # delete local/file
+  test_list.append(synctest("127", "", [local_f], [remote_f_del], [])) # delete remote/file
+  # access 0-sized file does not create a local copy
+  test_list.append(synctest("128", "", [remote_f], [local_l_to_f_access], [remote_f, local_l_to_f])) 
+  # access >0-sized file downloads
+  test_list.append(synctest("129", "", [remote_f2], [local_l_to_f2_access], [remote_f2, local_f2])) 
+  # files with same name but different size are not synced
+  test_list.append(synctest("130", "", [remote_f2, local_f2_wrong_size], [], [remote_f2, local_f2_wrong_size])) 
   
   # non-lazy mode tests
   
