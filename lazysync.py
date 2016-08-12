@@ -256,6 +256,11 @@ class lazysync(pyinotify.ProcessEvent):
       if(path_or_link_exists(remote_path)):
         os.remove(remote_path)
       os.symlink(relative_link_target, remote_path)
+      
+    # broken symlinks local -> target 
+    elif(os.path.islink(local_path) and os.path.realpath(local_path).startswith(self.config['remote']) and not os.path.exists(local_path)):
+      logger.warning("lazysync::action_local_create_modify_file() removing broken symlink '%s' -> '%s'", local_path, os.path.realpath(local_path))
+      os.remove(local_path)
     
     # all other files and symlinks
     else:

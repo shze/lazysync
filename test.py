@@ -194,12 +194,12 @@ if __name__ == "__main__":
   local_f = synctest_path(path_location.local, "f", path_type.file)
   local_f_del = synctest_path(path_location.local, "f", path_type.delete)
   local_l_to_f = synctest_path(path_location.local, "f", path_type.link)
-  local_l_to_f_access = synctest_path(path_location.local, "f", path_type.access)
+  local_f_access = synctest_path(path_location.local, "f", path_type.access)
   
   remote_f2 = synctest_path(path_location.remote, "f2", path_type.file, 100)
   local_f2 = synctest_path(path_location.local, "f2", path_type.file, 100)
   local_l_to_f2 = synctest_path(path_location.local, "f2", path_type.link)
-  local_l_to_f2_access = synctest_path(path_location.local, "f2", path_type.access)
+  local_f2_access = synctest_path(path_location.local, "f2", path_type.access)
   
   local_f2_wrong_size = synctest_path(path_location.local, "f2", path_type.file, 500)
   
@@ -226,15 +226,57 @@ if __name__ == "__main__":
   test_list.append(synctest("126", "", [local_f], [local_f_del], [])) # delete local/file
   test_list.append(synctest("127", "", [local_f], [remote_f_del], [])) # delete remote/file
   # access 0-sized file does not create a local copy
-  test_list.append(synctest("128", "", [remote_f], [local_l_to_f_access], [remote_f, local_l_to_f])) 
+  test_list.append(synctest("128", "", [remote_f], [local_f_access], [remote_f, local_l_to_f])) 
   # access >0-sized file downloads
-  test_list.append(synctest("129", "", [remote_f2], [local_l_to_f2_access], [remote_f2, local_f2])) 
+  test_list.append(synctest("129", "", [remote_f2], [local_f2_access], [remote_f2, local_f2])) 
   # files with same name but different size are not synced
   test_list.append(synctest("130", "", [remote_f2, local_f2_wrong_size], [], [remote_f2, local_f2_wrong_size])) 
   
   # non-lazy mode tests
+  test_list.append(synctest("200", "-n", [], [], [])) # empty
+  
+  test_list.append(synctest("210", "-n", [remote_d], [], [remote_d, local_d])) # initialize remote/dir
+  test_list.append(synctest("211", "-n", [local_d], [], [remote_d, local_d])) # initialize local/dir
+  test_list.append(synctest("212", "-n", [], [remote_d], [remote_d, local_d])) # create remote/dir
+  test_list.append(synctest("213", "-n", [], [local_d], [remote_d, local_d])) # create local/dir
+  test_list.append(synctest("214", "-n", [remote_d], [remote_d_del], [])) # delete remote/dir
+  test_list.append(synctest("215", "-n", [remote_d], [local_d_del], [])) # delete local/dir
+  test_list.append(synctest("216", "-n", [local_d], [local_d_del], [])) # delete local/dir
+  test_list.append(synctest("217", "-n", [local_d], [remote_d_del], [])) # delete remote/dir
+  
+  test_list.append(synctest("220", "-n", [remote_f], [], [remote_f, local_f])) # initialize remote/file
+  test_list.append(synctest("221", "-n", [local_f], [], [remote_f, local_f])) # initialize local/file
+  test_list.append(synctest("222", "-n", [], [remote_f], [remote_f, local_f])) # create remote/file
+  test_list.append(synctest("223", "-n", [], [local_f], [remote_f, local_f])) # create local/file
+  test_list.append(synctest("224", "-n", [remote_f], [remote_f_del], [])) # delete remote/file
+  test_list.append(synctest("225", "-n", [remote_f], [local_f_del], [])) # delete local/file
+  test_list.append(synctest("226", "-n", [local_f], [local_f_del], [])) # delete local/file
+  test_list.append(synctest("227", "-n", [local_f], [remote_f_del], [])) # delete remote/file
+  # access 0-sized file does not create a local copy
+  test_list.append(synctest("228", "-n", [remote_f], [local_f_access], [remote_f, local_f])) 
+  # access >0-sized file downloads
+  test_list.append(synctest("229", "-n", [remote_f2], [local_f2_access], [remote_f2, local_f2])) 
+  # files with same name but different size are not synced
+  test_list.append(synctest("230", "-n", [remote_f2, local_f2_wrong_size], [], [remote_f2, local_f2_wrong_size])) 
   
   # dry-run tests
+  test_list.append(synctest("300", "-d", [], [], [])) # empty
+  
+  test_list.append(synctest("310", "-d", [remote_d], [], [remote_d])) # initialize remote/dir
+  test_list.append(synctest("311", "-d", [local_d], [], [local_d])) # initialize local/dir
+  test_list.append(synctest("312", "-d", [], [remote_d], [remote_d])) # create remote/dir
+  test_list.append(synctest("313", "-d", [], [local_d], [local_d])) # create local/dir
+  test_list.append(synctest("314", "-d", [remote_d], [remote_d_del], [])) # delete remote/dir
+  test_list.append(synctest("316", "-d", [local_d], [local_d_del], [])) # delete local/dir
+  
+  test_list.append(synctest("320", "-d", [remote_f], [], [remote_f])) # initialize remote/file
+  test_list.append(synctest("321", "-d", [local_f], [], [local_f])) # initialize local/file
+  test_list.append(synctest("322", "-d", [], [remote_f], [remote_f])) # create remote/file
+  test_list.append(synctest("323", "-d", [], [local_f], [local_f])) # create local/file
+  test_list.append(synctest("324", "-d", [remote_f], [remote_f_del], [])) # delete remote/file
+  test_list.append(synctest("326", "-d", [local_f], [local_f_del], [])) # delete local/file
+  # files with same name but different size are not synced
+  test_list.append(synctest("330", "-d", [remote_f2, local_f2_wrong_size], [], [remote_f2, local_f2_wrong_size])) 
   
   for this_test in test_list:
     this_test.run()
