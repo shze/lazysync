@@ -304,7 +304,7 @@ class lazysync(pyinotify.ProcessEvent):
       if(files_identical(remote_path, local_path)):
         logger.info("lazysync::action_remote_create_modify_file() remote and local files are identical, no need to modify local path.")
         return 
-      logger.warning("lazysync::action_local_create_dir() symlink '%s' -> '%s' %s", local_path, remote_path, "(dry-run)" if self.config['dry-run'] else "")
+      logger.warning("lazysync::action_local_create_modify_file() symlink '%s' -> '%s' %s", local_path, remote_path, "(dry-run)" if self.config['dry-run'] else "")
       if(self.config['dry-run']):
         return 
       if(path_or_link_exists(local_path)):

@@ -16,11 +16,18 @@ Syncs two folders lazily.
 
 ## Status
 
-* Syncing should work for folders and files, including symlinks.
+* Syncing only works for folders and files, including symlinks, when both remote and local path are on a 
+  local filesystem.
   * Symlinks with a target within 'remote' or 'local' should be synced as symlinks with targets within 
     'local' or 'remote'; this also syncs dead symlinks.
+  * Empty files are not downloaded in lazy mode, only symlinked.
 * Known problems:
-  * None, but more tests are needed.
+  * inotify does not emit events for remote filesystems, which make this approach unusable.
+  * Relative symlinks local -> remote are not updated. (LazySync creates symlinks with absolute paths.)
+  * More tests are needed. Currently untested: unmounting remote or local while LazySync is running.
+* Not implemented:
+  * Size limit for downloaded files.
+  * Daemonization, definition of API for controling the daemin, implementation of a client.
 
 ## To Do
 
