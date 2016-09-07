@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 from __future__ import print_function
-import logging, argparse, os, sys
+import logging, argparse, os, sys, datetime
 
 # set up logging
 logger = logging.getLogger(os.path.basename(sys.argv[0]))
@@ -61,6 +61,7 @@ class syncfile:
 # main    
 if __name__ == "__main__":
   logger.debug("__main__()")
+  logger.debug("__main__() stat_float_times=%d", os.stat_float_times()) # set to true if not true
   config = merge_two_dicts(get_config(), parse_command_line()) # cmd line second to overwrite default settings in config
 
   remote_folder_set, remote_file_set = relative_walk(config['remote']) 
@@ -80,38 +81,52 @@ if __name__ == "__main__":
     local_path = os.path.join(config['local'], path)
     logger.debug("__main__ lstat for remote_path='%s'", remote_path)
     logger.debug("__main__ lstat for local_path='%s'", local_path)
-    statinfo_remote = os.lstat(remote_path)
-    statinfo_local = os.lstat(local_path)
-    syncfile_list.append(syncfile(path, statinfo_remote.st_atime, statinfo_remote.st_mtime, statinfo_local.st_atime, statinfo_local.st_mtime))
+    #statinfo_remote = os.lstat(remote_path)
+    #statinfo_local = os.lstat(local_path)
+    #syncfile_list.append(syncfile(path, statinfo_remote.st_atime, statinfo_remote.st_mtime, statinfo_local.st_atime, statinfo_local.st_mtime))
+    syncfile_list.append(syncfile(path,
+                                  os.path.getatime(remote_path), os.path.getmtime(remote_path),
+                                  os.path.getatime(local_path), os.path.getmtime(local_path)))
   for path in files_both:
     remote_path = os.path.join(config['remote'], path)
     local_path = os.path.join(config['local'], path)
     logger.debug("__main__ lstat for remote_path='%s'", remote_path)
     logger.debug("__main__ lstat for local_path='%s'", local_path)
-    statinfo_remote = os.lstat(remote_path)
-    statinfo_local = os.lstat(local_path)
-    syncfile_list.append(syncfile(path, statinfo_remote.st_atime, statinfo_remote.st_mtime, statinfo_local.st_atime, statinfo_local.st_mtime))
+    #statinfo_remote = os.lstat(remote_path)
+    #statinfo_local = os.lstat(local_path)
+    #syncfile_list.append(syncfile(path, statinfo_remote.st_atime, statinfo_remote.st_mtime, statinfo_local.st_atime, statinfo_local.st_mtime))
+    syncfile_list.append(syncfile(path,
+                                  os.path.getatime(remote_path), os.path.getmtime(remote_path),
+                                  os.path.getatime(local_path), os.path.getmtime(local_path)))
   for path in folders_remote_only:
     remote_path = os.path.join(config['remote'], path)
     logger.debug("__main__ lstat for remote_path='%s'", remote_path)
-    statinfo_remote = os.lstat(remote_path)
-    syncfile_list.append(syncfile(path, statinfo_remote.st_atime, statinfo_remote.st_mtime, 0, 0))
+    #statinfo_remote = os.lstat(remote_path)
+    #syncfile_list.append(syncfile(path, statinfo_remote.st_atime, statinfo_remote.st_mtime, 0, 0))
+    syncfile_list.append(syncfile(path, os.path.getatime(remote_path), os.path.getmtime(remote_path), 0, 0))
   for path in files_remote_only:
     remote_path = os.path.join(config['remote'], path)
     logger.debug("__main__ lstat for remote_path='%s'", remote_path)
-    statinfo_remote = os.lstat(remote_path)
+    #statinfo_remote = os.lstat(remote_path)
     #logger.debug("__main__ lstat for remote_path='%s' statinfo='%s'", remote_path, statinfo_remote)
-    syncfile_list.append(syncfile(path, statinfo_remote.st_atime, statinfo_remote.st_mtime, 0, 0))
+    #syncfile_list.append(syncfile(path, statinfo_remote.st_atime, statinfo_remote.st_mtime, 0, 0))
+    syncfile_list.append(syncfile(path, os.path.getatime(remote_path), os.path.getmtime(remote_path), 0, 0))
   for path in folders_local_only:
     local_path = os.path.join(config['local'], path)
     logger.debug("__main__ lstat for local_path='%s'", local_path)
-    statinfo_local = os.lstat(local_path)
-    syncfile_list.append(syncfile(path, 0, 0, statinfo_local.st_atime, statinfo_local.st_mtime))
+    #statinfo_local = os.lstat(local_path)
+    #syncfile_list.append(syncfile(path, 0, 0, statinfo_local.st_atime, statinfo_local.st_mtime))
+    syncfile_list.append(syncfile(path, 0, 0, os.path.getatime(local_path), os.path.getmtime(local_path)))
   for path in files_local_only:
     local_path = os.path.join(config['local'], path)
     logger.debug("__main__ lstat for local_path='%s'", local_path)
-    statinfo_local = os.lstat(local_path)
-    syncfile_list.append(syncfile(path, 0, 0, statinfo_local.st_atime, statinfo_local.st_mtime))
+    #statinfo_local = os.lstat(local_path)
+    #syncfile_list.append(syncfile(path, 0, 0, statinfo_local.st_atime, statinfo_local.st_mtime))
+    syncfile_list.append(syncfile(path, 0, 0, os.path.getatime(local_path), os.path.getmtime(local_path)))
     
   for this_syncfile in syncfile_list:
-    logger.debug("__main__ path='%s' r_atime=%d r_mtime=%d", this_syncfile.path, this_syncfile.remote_atime, this_syncfile.remote_mtime)
+    logger.debug("__main__ path='%s' r_atime=%s r_mtime=%f l_atime=%f l_mtime=%f", 
+                 this_syncfile.path,
+                 datetime.datetime.fromtimestamp(this_syncfile.remote_atime).strftime('%Y-%m-%d %H:%M:%S.%f'), # python datetime only supports microseconds, not nanoseconds, see: http://stackoverflow.com/questions/15649942 
+                 #this_syncfile.remote_atime, 
+                 this_syncfile.remote_mtime, this_syncfile.local_atime, this_syncfile.local_mtime)
