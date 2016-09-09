@@ -2,7 +2,7 @@
 
 from __future__ import print_function
 from collections import deque # implements atomic append() and popleft() that do not require locking
-import logging, argparse, os, sys, datetime, time, timeit
+import logging, argparse, os, sys, datetime, time, timeit, signal, enum # enum is enum34
 
 # global variables
 sigint = False # variable to check for sigint
@@ -37,7 +37,7 @@ def parse_command_line():
     'local': os.path.abspath(args.local)
   }
 
-# Given two dicts, merge them into a new dict as a shallow copy; see http://stackoverflow.com/questions/38987/
+# given two dicts, merge them into a new dict as a shallow copy; see http://stackoverflow.com/questions/38987/
 def merge_two_dicts(x, y):
   logger.debug("merge_two_dicts()")
   z = x.copy()
@@ -57,22 +57,29 @@ def relative_walk(root_folder):
       files.add(os.path.normpath(os.path.join(relative_dirpath, filename)))
   return folders, files
 
-# has no path
+# TODO document: has no path
 class syncfiledata:
   #
-  def __init__(self, remote_atime, remote_mtime, local_atime, local_mtime):
+  def __init__(self, is_dir, is_file, is_link, remote_atime, remote_mtime, local_atime, local_mtime):
     logger.debug("syncfiledata::__init__()")
+    self.is_dir = is_dir
+    self.is_file = is_file
+    self.is_link = is_link
     self.remote_atime = remote_atime
     self.remote_mtime = remote_mtime
     self.local_atime = local_atime
     self.local_mtime = local_mtime
 
 #
+syncaction = enum.Enum('syncaction', 'cp_local cp_remote ln_remote rm_local rm_remote')
+
+#
 class synctask:
   #
-  def __init__(self, path):
+  def __init__(self, path, action):
     logger.debug("synctask::__init__()")
     self.path = path
+    self.action = action
     
 # lazily syncs two folders with the given config parameters
 class lazysync:
@@ -96,12 +103,28 @@ class lazysync:
     files_remote_only = remote_file_set - local_file_set # files only in remote_file_set: need to be copied/symlinked
     files_local_only = local_file_set - remote_file_set # files only in local_file_set: need to be copied
     
-    # folders_both and files_both need to be compared against data self.files
-    # *_only has to be added to the self.queue
+    # folders_both and files_both need to be compared against self.files, and, if different, added to self.queue
+    for path in folders_both | files_both:
+      path_remote = os.path.join(config['remote'], path)
+      path_local = os.path.join(config['local'], path)
+      statinfo_remote = os.lstat(path_remote)
+      statinfo_local = os.lstat(path_local)
+      
+      current_syncfiledata = self.files[path]
+      
+      # TODO compare statinfo_* with current_syncfiledata, compare file size, content
+      
+    # TODO *_only has to be added to self.queue
+    for path in folders_remote_only | files_remote_only:
+      pass
+    for path in folders_local_only | files_local_only:
+      pass
     
   #
   def process_next_change(self):
-    logger.debug("lazysync::process_next_change()")
+    logger.debug("lazysync::process_next_change() queue.size=%s", len(self.queue))
+    task = self.queue.popleft()
+    # TODO save state
   
   # loop to detect sigint
   def loop(self):
@@ -117,16 +140,17 @@ class lazysync:
         
       duration = timeit.default_timer() -  start_time
       logger.debug("lazysync::loop() duration=%f", duration)
-      self.sleep_time += max(duration, min_sleep)
+      self.sleep_time += duration
 
-      if(self.sleep_time > 0):
+      if(not self.queue and self.sleep_time > 0): # sleep to avoid 100% cpu load; a small delay is tolerable to quit 
         logger.debug("lazysync::loop() sleep with sleep_time=%f", self.sleep_time)
-        time.sleep(min_sleep) # avoid 100% cpu load and a small delay is tolerable to quit 
-        self.sleep_time = min(0, self.sleep_time - min_sleep)
+        time.sleep(min_sleep) # sleep fixed time to pace polling if duration is very short
+        self.sleep_time = max(0, self.sleep_time - min_sleep)
   
 # main    
 if __name__ == "__main__":
   logger.debug("__main__()")
+  signal.signal(signal.SIGINT, sigint_handler)
   config = merge_two_dicts(get_config(), parse_command_line()) # cmd line second to overwrite default settings in config
   sync = lazysync(config)
   sync.loop()
