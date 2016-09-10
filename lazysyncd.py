@@ -2,7 +2,7 @@
 
 from __future__ import print_function
 from collections import deque # implements atomic append() and popleft() that do not require locking
-import logging, argparse, os, sys, datetime, time, timeit, signal, enum # enum is enum34
+import logging, argparse, os, sys, datetime, time, timeit, signal, stat, math, enum # enum is enum34
 
 # global variables
 sigint = False # variable to check for sigint
@@ -60,15 +60,38 @@ def relative_walk(root_folder):
 # TODO document: has no path
 class syncfiledata:
   #
-  def __init__(self, is_dir, is_file, is_link, remote_atime, remote_mtime, local_atime, local_mtime):
+  def __init__(self, path):
     logger.debug("syncfiledata::__init__()")
-    self.is_dir = is_dir
-    self.is_file = is_file
-    self.is_link = is_link
-    self.remote_atime = remote_atime
-    self.remote_mtime = remote_mtime
-    self.local_atime = local_atime
-    self.local_mtime = local_mtime
+    statinfo = os.lstat(path)
+    # TODO add content hash
+    self.is_dir = stat.S_ISDIR(statinfo.st_mode)
+    self.is_file = stat.S_ISREG(statinfo.st_mode)
+    self.is_link = stat.S_ISLNK(statinfo.st_mode)
+    self.atime = statinfo.st_atime
+    self.mtime = statinfo.st_mtime
+    self.size = statinfo.st_size
+    
+  #
+  def equal_without_atime(self, other):
+    logger.debug("syncfiledata::equal_without_atime() equal=%s (is_dir=%s is_file=%s is_link=%s mtime=%s size=%s)", 
+                 self.is_dir == other.is_dir and self.is_file == other.is_file and self.is_link == other.is_link and
+                 math.floor(self.mtime) == math.floor(other.mtime) and self.size == other.size,
+                 self.is_dir == other.is_dir, self.is_file == other.is_file, self.is_link == other.is_link, 
+                 math.floor(self.mtime) == math.floor(other.mtime), self.size == other.size)
+    return self.is_dir == other.is_dir and self.is_file == other.is_file and self.is_link == other.is_link and \
+        math.floor(self.mtime) == math.floor(other.mtime) and self.size == other.size;
+  
+  #
+  def __str__(self):
+    return str(self.__dict__)
+  
+# TODO document: has no path
+class syncfilepair:
+  #
+  def __init__(self, syncfiledata_remote, syncfiledata_local):
+    logger.debug("syncfilepair::__init__()")
+    self.syncfiledata_remote = syncfiledata_remote
+    self.syncfiledata_local = syncfiledata_local
 
 #
 syncaction = enum.Enum('syncaction', 'cp_local cp_remote ln_remote rm_local rm_remote')
@@ -87,7 +110,7 @@ class lazysync:
   def __init__(self, config):
     logger.debug("lazysync::__init__()")
     self.queue = deque() # queue of synctasks
-    self.files = {} # dictionary of syncfiledata
+    self.files = {} # dictionary of syncfilepair to keep track of atimes
     self.sleep_time = 0
     
   # 
@@ -105,20 +128,28 @@ class lazysync:
     
     # folders_both and files_both need to be compared against self.files, and, if different, added to self.queue
     for path in folders_both | files_both:
-      path_remote = os.path.join(config['remote'], path)
-      path_local = os.path.join(config['local'], path)
-      statinfo_remote = os.lstat(path_remote)
-      statinfo_local = os.lstat(path_local)
+      logger.debug("lazysync::find_changes() found path in both: %s", path)
+      new_syncfiledata_remote = syncfiledata(os.path.join(config['remote'], path))
+      new_syncfiledata_local = syncfiledata(os.path.join(config['local'], path))
       
-      current_syncfiledata = self.files[path]
+      if(new_syncfiledata_remote.equal_without_atime(new_syncfiledata_local)):
+        logger.debug("lazysync::find_changes() equal")
+        self.files[path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
+      else:
+        if(new_syncfiledata_remote.mtime > new_syncfiledata_local.mtime):
+          logger.debug("lazysync::find_changes() NOT equal; task: ln remote local")
+          self.queue.append(synctask(path, 'ln_remote'))
+        else:
+          logger.debug("lazysync::find_changes() NOT equal; task: cp local remote")
+          self.queue.append(synctask(path, 'cp_local'))
       
-      # TODO compare statinfo_* with current_syncfiledata, compare file size, content
-      
-    # TODO *_only has to be added to self.queue
+    # *_only has to be added to self.queue
     for path in folders_remote_only | files_remote_only:
-      pass
+      logger.debug("lazysync::find_changes() found path remote only: %s", path)
+      self.queue.append(synctask(path, 'ln_remote'))
     for path in folders_local_only | files_local_only:
-      pass
+      logger.debug("lazysync::find_changes() found path local only: %s", path)
+      self.queue.append(synctask(path, 'cp_local'))
     
   #
   def process_next_change(self):
