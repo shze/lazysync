@@ -99,9 +99,9 @@ syncaction = enum.Enum('syncaction', 'cp_local cp_remote ln_remote rm_local rm_r
 #
 class synctask:
   #
-  def __init__(self, path, action):
+  def __init__(self, relative_path, action):
     logger.debug("synctask::__init__()")
-    self.path = path
+    self.relative_path = relative_path
     self.action = action
     
 # lazily syncs two folders with the given config parameters
@@ -127,34 +127,71 @@ class lazysync:
     files_local_only = local_file_set - remote_file_set # files only in local_file_set: need to be copied
     
     # folders_both and files_both need to be compared against self.files, and, if different, added to self.queue
-    for path in folders_both | files_both:
-      logger.debug("lazysync::find_changes() found path in both: %s", path)
-      new_syncfiledata_remote = syncfiledata(os.path.join(config['remote'], path))
-      new_syncfiledata_local = syncfiledata(os.path.join(config['local'], path))
+    for relative_path in folders_both | files_both:
+      logger.debug("lazysync::find_changes() found relative_path in both: %s", relative_path)
+      new_syncfiledata_remote = syncfiledata(os.path.join(config['remote'], relative_path))
+      new_syncfiledata_local = syncfiledata(os.path.join(config['local'], relative_path))
       
       if(new_syncfiledata_remote.equal_without_atime(new_syncfiledata_local)):
         logger.debug("lazysync::find_changes() equal")
-        self.files[path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
+        self.files[relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
       else:
         if(new_syncfiledata_remote.mtime > new_syncfiledata_local.mtime):
           logger.debug("lazysync::find_changes() NOT equal; task: ln remote local")
-          self.queue.append(synctask(path, 'ln_remote'))
+          self.queue.append(synctask(relative_path, 'ln_remote'))
         else:
           logger.debug("lazysync::find_changes() NOT equal; task: cp local remote")
-          self.queue.append(synctask(path, 'cp_local'))
+          self.queue.append(synctask(relative_path, 'cp_local'))
       
     # *_only has to be added to self.queue
-    for path in folders_remote_only | files_remote_only:
-      logger.debug("lazysync::find_changes() found path remote only: %s", path)
-      self.queue.append(synctask(path, 'ln_remote'))
-    for path in folders_local_only | files_local_only:
-      logger.debug("lazysync::find_changes() found path local only: %s", path)
-      self.queue.append(synctask(path, 'cp_local'))
+    for relative_path in folders_remote_only | files_remote_only:
+      logger.debug("lazysync::find_changes() found relative_path remote only: %s", relative_path)
+      self.queue.append(synctask(relative_path, 'ln_remote'))
+    for relative_path in folders_local_only | files_local_only:
+      logger.debug("lazysync::find_changes() found relative_path local only: %s", relative_path)
+      self.queue.append(synctask(relative_path, 'cp_local'))
+      
+  #
+  def action_cp_local(self, relative_path):
+    logger.info("lazysync::action_cp_local() relative_path='%s'", relative_path)
+    path_remote = os.path.join(self.config['remote'], relative_path)
+    path_local = os.path.join(self.config['local'], relative_path)
+    
+    # TODO clear potential remote file/symlink; handle folders, files, symlinks
+    
+  #
+  def action_cp_remote(self, relative_path):
+    logger.info("lazysync::action_cp_remote() relative_path='%s'", relative_path)
+    path_remote = os.path.join(self.config['remote'], relative_path)
+    path_local = os.path.join(self.config['local'], relative_path)
+    
+    # TODO clear potential local symlink; handle folders, files, symlinks
+    
+  #
+  def action_ln_remote(self, relative_path):
+    logger.info("lazysync::action_ln_remote() relative_path='%s'", relative_path)
+    path_remote = os.path.join(self.config['remote'], relative_path)
+    path_local = os.path.join(self.config['local'], relative_path)
+    
+    # TODO clear potential local file; handle folders, files, symlinks
     
   #
   def process_next_change(self):
     logger.debug("lazysync::process_next_change() queue.size=%s", len(self.queue))
     task = self.queue.popleft()
+    if(task.action == syncaction.cp_local):
+      self.action_cp_local(task.relative_path)
+    elif(task.action == syncaction.cp_remote):
+      self.action_cp_remote(task.relative_path)
+    elif(task.action == syncaction.ln_remote):
+      self.action_ln_remote(task.relative_path)
+    elif(task.action == syncaction.rm_local):
+      pass
+    elif(task.action == syncaction.rm_remote):
+      pass
+    else:
+      logger.debug("lazysync::process_next_change() UNKNOWN ACTION")
+      
     # TODO save state
   
   # loop to detect sigint
@@ -186,60 +223,7 @@ if __name__ == "__main__":
   sync = lazysync(config)
   sync.loop()
 
-  
-  #logger.debug("__main__() stat_float_times=%d", os.stat_float_times()) # set to true if not true
-
-  
-  
-  #syncfile_list = []
-  
-  #for path in folders_both:
-    #remote_path = os.path.join(config['remote'], path)
-    #local_path = os.path.join(config['local'], path)
-    #logger.debug("__main__ lstat for remote_path='%s'", remote_path)
-    #logger.debug("__main__ lstat for local_path='%s'", local_path)
-    ##statinfo_remote = os.lstat(remote_path)
-    ##statinfo_local = os.lstat(local_path)
-    ##syncfile_list.append(syncfile(path, statinfo_remote.st_atime, statinfo_remote.st_mtime, statinfo_local.st_atime, statinfo_local.st_mtime))
-    #syncfile_list.append(syncfile(path,
-                                  #os.path.getatime(remote_path), os.path.getmtime(remote_path),
-                                  #os.path.getatime(local_path), os.path.getmtime(local_path)))
-  #for path in files_both:
-    #remote_path = os.path.join(config['remote'], path)
-    #local_path = os.path.join(config['local'], path)
-    #logger.debug("__main__ lstat for remote_path='%s'", remote_path)
-    #logger.debug("__main__ lstat for local_path='%s'", local_path)
-    ##statinfo_remote = os.lstat(remote_path)
-    ##statinfo_local = os.lstat(local_path)
-    ##syncfile_list.append(syncfile(path, statinfo_remote.st_atime, statinfo_remote.st_mtime, statinfo_local.st_atime, statinfo_local.st_mtime))
-    #syncfile_list.append(syncfile(path,
-                                  #os.path.getatime(remote_path), os.path.getmtime(remote_path),
-                                  #os.path.getatime(local_path), os.path.getmtime(local_path)))
-  #for path in folders_remote_only:
-    #remote_path = os.path.join(config['remote'], path)
-    #logger.debug("__main__ lstat for remote_path='%s'", remote_path)
-    ##statinfo_remote = os.lstat(remote_path)
-    ##syncfile_list.append(syncfile(path, statinfo_remote.st_atime, statinfo_remote.st_mtime, 0, 0))
-    #syncfile_list.append(syncfile(path, os.path.getatime(remote_path), os.path.getmtime(remote_path), 0, 0))
-  #for path in files_remote_only:
-    #remote_path = os.path.join(config['remote'], path)
-    #logger.debug("__main__ lstat for remote_path='%s'", remote_path)
-    ##statinfo_remote = os.lstat(remote_path)
-    ##logger.debug("__main__ lstat for remote_path='%s' statinfo='%s'", remote_path, statinfo_remote)
-    ##syncfile_list.append(syncfile(path, statinfo_remote.st_atime, statinfo_remote.st_mtime, 0, 0))
-    #syncfile_list.append(syncfile(path, os.path.getatime(remote_path), os.path.getmtime(remote_path), 0, 0))
-  #for path in folders_local_only:
-    #local_path = os.path.join(config['local'], path)
-    #logger.debug("__main__ lstat for local_path='%s'", local_path)
-    ##statinfo_local = os.lstat(local_path)
-    ##syncfile_list.append(syncfile(path, 0, 0, statinfo_local.st_atime, statinfo_local.st_mtime))
-    #syncfile_list.append(syncfile(path, 0, 0, os.path.getatime(local_path), os.path.getmtime(local_path)))
-  #for path in files_local_only:
-    #local_path = os.path.join(config['local'], path)
-    #logger.debug("__main__ lstat for local_path='%s'", local_path)
-    ##statinfo_local = os.lstat(local_path)
-    ##syncfile_list.append(syncfile(path, 0, 0, statinfo_local.st_atime, statinfo_local.st_mtime))
-    #syncfile_list.append(syncfile(path, 0, 0, os.path.getatime(local_path), os.path.getmtime(local_path)))
+  # TODO logger.debug("__main__() stat_float_times=%d", os.stat_float_times()) # set to true if not true
     
   #for this_syncfile in syncfile_list:
     #logger.debug("__main__ path='%s' r_atime=%s r_mtime=%f l_atime=%f l_mtime=%f", 
