@@ -2,7 +2,7 @@
 
 from __future__ import print_function
 from collections import deque # implements atomic append() and popleft() that do not require locking
-import logging, argparse, os, sys, datetime, time, timeit, signal, stat, math, enum # enum is enum34
+import logging, argparse, os, sys, datetime, time, timeit, signal, stat, math, shutil, enum # enum is enum34
 
 # global variables
 sigint = False # variable to check for sigint
@@ -71,19 +71,29 @@ class syncfiledata:
     self.mtime = statinfo.st_mtime
     self.size = statinfo.st_size
     
-  #
+  # return if two syncfiledatas are equal without looking at the atime, and without the size if it is for directories
   def equal_without_atime(self, other):
-    logger.debug("syncfiledata::equal_without_atime() equal=%s (is_dir=%s is_file=%s is_link=%s mtime=%s size=%s)", 
-                 self.is_dir == other.is_dir and self.is_file == other.is_file and self.is_link == other.is_link and
-                 math.floor(self.mtime) == math.floor(other.mtime) and self.size == other.size,
-                 self.is_dir == other.is_dir, self.is_file == other.is_file, self.is_link == other.is_link, 
-                 math.floor(self.mtime) == math.floor(other.mtime), self.size == other.size)
-    return self.is_dir == other.is_dir and self.is_file == other.is_file and self.is_link == other.is_link and \
-        math.floor(self.mtime) == math.floor(other.mtime) and self.size == other.size;
+    logger.debug("syncfiledata::equal_without_atime() self={%s}", self)
+    logger.debug("syncfiledata::equal_without_atime() other={%s}", other)
+    
+    equal_is_dir = self.is_dir == other.is_dir
+    equal_is_file = self.is_file == other.is_file
+    equal_is_link = self.is_link == other.is_link
+    equal_mtime = math.floor(self.mtime) == math.floor(other.mtime)
+    equal_size = self.size == other.size or self.is_dir
+    all_equal = equal_is_dir and equal_is_file and equal_is_link and equal_mtime and equal_size
+    
+    logger.debug("syncfiledata::equal_without_atime() equal=%s (is_dir=%s, is_file=%s, is_link=%s, mtime=%s, size=%s)", 
+                 all_equal, equal_is_dir, equal_is_file, equal_is_link, equal_mtime, equal_size)
+    return all_equal;
   
   #
   def __str__(self):
-    return str(self.__dict__)
+    return "is_dir=%s, is_file=%s, is_link=%s, atime=%f (%s), mtime=%f (%s), size=%s" \
+        % (self.is_dir, self.is_file, self.is_link, 
+           self.atime, datetime.datetime.fromtimestamp(self.atime).strftime('%Y-%m-%d %H:%M:%S.%f'), 
+           self.mtime, datetime.datetime.fromtimestamp(self.mtime).strftime('%Y-%m-%d %H:%M:%S.%f'),
+           self.size)
   
 # TODO document: has no path
 class syncfilepair:
@@ -170,7 +180,16 @@ class lazysync:
     path_local = os.path.join(self.config['local'], relative_path)
     
     # TODO clear potential remote file/symlink; handle folders, files, symlinks
-    
+    if(os.path.islink(path_local)):
+      pass
+    elif(os.path.isdir(path_local)):
+      logger.info("lazysync::action_cp_local() relative_path is dir, mkdir remote='%s'", path_remote)
+      os.makedirs(path_remote)
+      shutil.copystat(path_local, path_remote)
+    else:
+      logger.info("lazysync::action_cp_local() relative_path is file, cp local='%s' remote='%s'", path_local, path_remote)
+      shutil.copy2(path_local, path_remote)
+
   #
   def action_cp_remote(self, relative_path):
     logger.info("lazysync::action_cp_remote() relative_path='%s'", relative_path)
@@ -186,6 +205,15 @@ class lazysync:
     path_local = os.path.join(self.config['local'], relative_path)
     
     # TODO clear potential local file; handle folders, files, symlinks
+    if(os.path.islink(path_local)):
+      pass
+    elif(os.path.isdir(path_local)):
+      logger.info("lazysync::action_cp_remote() relative_path is dir, mkdir local='%s'", path_local)
+      os.makedirs(path_local)
+      shutil.copystat(path_remote, path_local)
+    else:
+      logger.info("lazysync::action_cp_local() relative_path is file, ln -s remote='%s' local='%s'", path_remote, path_local)
+      os.symlink(path_remote, path_local)
     
   #
   def action_rm_local(self, relative_path):
@@ -204,7 +232,10 @@ class lazysync:
     else:
       logger.debug("lazysync::process_next_change() UNKNOWN ACTION")
       
-    # TODO save state
+    # save state
+    #new_syncfiledata_remote = syncfiledata(os.path.join(self.config['remote'], task.relative_path))
+    #new_syncfiledata_local = syncfiledata(os.path.join(self.config['local'], task.relative_path))
+    #self.files[task.relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
   
   # loop to detect sigint
   def loop(self):
