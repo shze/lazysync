@@ -6,7 +6,7 @@ import logging, argparse, os, sys, datetime, time, timeit, signal, stat, math, s
 
 # global variables
 sigint = False # variable to check for sigint
-min_sleep = 1.9
+min_sleep = 1.9 # seconds
 # set up logging
 logger = logging.getLogger(os.path.basename(sys.argv[0]))
 logger.setLevel(logging.DEBUG)
@@ -20,7 +20,7 @@ def sigint_handler(signal, frame):
   global sigint
   sigint = True
   
-# TODO allow human readable limits
+#
 def get_config():
   logger.debug("get_config()")
   return {}
@@ -37,12 +37,21 @@ def parse_command_line():
     'local': os.path.abspath(args.local)
   }
 
-# given two dicts, merge them into a new dict as a shallow copy; see http://stackoverflow.com/questions/38987/
-def merge_two_dicts(x, y):
-  logger.debug("merge_two_dicts()")
-  z = x.copy()
-  z.update(y) # keys in y overwrite existing keys in x/z!
-  return z
+# merge two dicts; if key is in both and data is list or dict, merge; else overwrite default_dct with dct
+def merge_two_dicts(dct, default_dct):
+  final_dct = {}
+  for k in set(dct).union(default_dct): # for all keys
+    # if k is in both dicts, and data is list or dict, merge
+    if k in dct and k in default_dct and isinstance(dct[k], list) and isinstance(default_dct[k], list):
+      final_dct[k] = dct[k] + default_dct[k]
+    elif k in dct and k in default_dct and isinstance(dct[k], dict) and isinstance(default_dct[k], dict):
+      final_dct[k] = merge_two_dicts(dct[k], default_dct[k])
+    # if k is not in both, use dct first, and default_dct second
+    elif k in dct:
+      final_dct[k] = dct[k]
+    else:
+      final_dct[k] = default_dct[k]
+  return final_dct
 
 # walk all files and folders recursively starting at root_folder; all files and folders are relative to root_folder
 def relative_walk(root_folder):
@@ -57,7 +66,7 @@ def relative_walk(root_folder):
       files.add(os.path.normpath(os.path.join(relative_dirpath, filename)))
   return folders, files
 
-# TODO document: has no path
+# stores the metadata for one file; contains no path
 class syncfiledata:
   #
   def __init__(self, path):
@@ -97,7 +106,7 @@ class syncfiledata:
            self.mtime, datetime.datetime.fromtimestamp(self.mtime).strftime('%Y-%m-%d %H:%M:%S.%f'),
            self.size)
   
-# TODO document: has no path
+# stores the metadata for a pair of synced files; contains no path
 class syncfilepair:
   #
   def __init__(self, syncfiledata_remote, syncfiledata_local):
@@ -163,9 +172,14 @@ class lazysync:
     # folders_both and files_both need to be compared against self.files, and, if different, added to self.queue
     for relative_path in folders_both | files_both: # for existing folders and files ordering them is not needed
       logger.debug("lazysync::find_changes() found relative_path in both: %s", relative_path)
-      new_syncfiledata_remote = syncfiledata(os.path.join(self.config['remote'], relative_path))
-      new_syncfiledata_local = syncfiledata(os.path.join(self.config['local'], relative_path))
+      path_remote = os.path.join(self.config['remote'], relative_path)
+      path_local = os.path.join(self.config['local'], relative_path)
+      new_syncfiledata_remote = syncfiledata(path_remote)
+      new_syncfiledata_local = syncfiledata(path_local)
       
+      if(os.path.islink(path_local) and os.path.realpath(path_local) == path_remote):
+        logger.debug("lazysync::find_changes() path_local is a symlink to path_remote, no changes needed")
+        continue
       if(new_syncfiledata_remote.equal_without_atime(new_syncfiledata_local)):
         logger.debug("lazysync::find_changes() equal")
         self.files[relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
@@ -201,7 +215,8 @@ class lazysync:
       os.makedirs(path_remote)
       shutil.copystat(path_local, path_remote)
     else:
-      logger.debug("lazysync::action_cp_local() relative_path is file, cp local='%s' remote='%s'", path_local, path_remote)
+      logger.debug("lazysync::action_cp_local() relative_path is file, cp local='%s' remote='%s'", path_local, 
+                   path_remote)
       shutil.copy2(path_local, path_remote)
 
   #
@@ -226,7 +241,8 @@ class lazysync:
       os.makedirs(path_local)
       shutil.copystat(path_remote, path_local)
     else:
-      logger.debug("lazysync::action_ln_remote() relative_path is file, ln -s remote='%s' local='%s'", path_remote, path_local)
+      logger.debug("lazysync::action_ln_remote() relative_path is file, ln -s remote='%s' local='%s'", path_remote, 
+                   path_local)
       os.symlink(path_remote, path_local)
     
   #
@@ -244,9 +260,9 @@ class lazysync:
     if(task.action in self.syncaction_functions):
       self.syncaction_functions[task.action](task.relative_path)
     else:
-      logger.debug("lazysync::process_next_change() UNKNOWN ACTION")
+      logger.debug("lazysync::process_next_change() no action for task '%s'", task.action)
       
-    # save state
+    # TODO save state
     #new_syncfiledata_remote = syncfiledata(os.path.join(self.config['remote'], task.relative_path))
     #new_syncfiledata_local = syncfiledata(os.path.join(self.config['local'], task.relative_path))
     #self.files[task.relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
@@ -276,15 +292,8 @@ class lazysync:
 if __name__ == "__main__":
   logger.debug("__main__()")
   signal.signal(signal.SIGINT, sigint_handler)
+  os.stat_float_times(True) # not needed, b/c syncfiledata.equal_without_atime() only uses the int part b/c remote fs only report int values
+  
   config = merge_two_dicts(get_config(), parse_command_line()) # cmd line second to overwrite default settings in config
   sync = lazysync(config)
   sync.loop()
-
-  # TODO logger.debug("__main__() stat_float_times=%d", os.stat_float_times()) # set to true if not true
-    
-  #for this_syncfile in syncfile_list:
-    #logger.debug("__main__ path='%s' r_atime=%s r_mtime=%f l_atime=%f l_mtime=%f", 
-                 #this_syncfile.path,
-                 #datetime.datetime.fromtimestamp(this_syncfile.remote_atime).strftime('%Y-%m-%d %H:%M:%S.%f'), # python datetime only supports microseconds, not nanoseconds, see: http://stackoverflow.com/questions/15649942 
-                 ##this_syncfile.remote_atime, 
-                 #this_syncfile.remote_mtime, this_syncfile.local_atime, this_syncfile.local_mtime)
