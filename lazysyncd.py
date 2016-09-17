@@ -25,8 +25,8 @@ def sigint_handler(signal, frame):
   sigint = True
   
 #
-def get_config():
-  logger.debug("get_config()")
+def get_default_config():
+  logger.debug("get_default_config()")
   return {
     'ignore' : [backup_dir] # relative paths
   }
@@ -170,7 +170,12 @@ class lazysync:
                                  self.syncactions.ln_remote: self.action_ln_remote,
                                  self.syncactions.rm_local: self.action_rm_local,
                                  self.syncactions.rm_remote: self.action_rm_remote}
-    
+
+    # do not start syncing until both folders are available    
+    while(not sigint and (not os.path.isdir(self.config['remote']) or not os.path.isdir(self.config['local']))):
+      logger.debug("lazysync::__init__() waiting for synced folders to be accessible")
+      time.sleep(min_sleep * 2)
+      
     path_pair = self.config['remote'] + '?' + self.config['local']
     self.hashed_path_pair = hashlib.sha1(path_pair.encode()).hexdigest()
     self.load_data()
@@ -425,6 +430,6 @@ if __name__ == "__main__":
   signal.signal(signal.SIGINT, sigint_handler)
   os.stat_float_times(True) # not needed, b/c syncfiledata.equal_without_atime() only uses the int part b/c remote fs only report int values
   
-  config = merge_two_dicts(parse_command_line(), get_config()) # cmd line first to overwrite default settings in config
+  config = merge_two_dicts(parse_command_line(), get_default_config()) # cmd line first to overwrite default settings in config
   sync = lazysync(config)
   sync.loop()
