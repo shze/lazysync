@@ -321,12 +321,25 @@ class lazysync:
       new_syncfiledata_remote = syncfiledata(path_remote)
       new_syncfiledata_local = syncfiledata(path_local)
       
-      if(os.path.islink(path_local) and os.path.realpath(path_local) == path_remote):
-        logger.debug("lazysync::find_changes() path_local is a symlink to path_remote, no changes needed")
-        self.files[relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
+      if(os.path.islink(path_local) and os.path.realpath(path_local) == path_remote): # always to file, never to dir
+        # if the file was tracked before and it has been accessed since, download it
+        if(relative_path in self.files 
+           and self.files[relative_path].syncfiledata_remote.atime < new_syncfiledata_remote.atime):
+          logger.debug("lazysync::find_changes() remote has been accessed, old=%f (%s), new=%f (%s), downloading.", 
+                       self.files[relative_path].syncfiledata_remote.atime, 
+                       datetime.datetime.fromtimestamp(self.files[relative_path].syncfiledata_remote.atime).strftime(
+                         '%Y-%m-%d %H:%M:%S.%f'),
+                       new_syncfiledata_remote.atime, 
+                       datetime.datetime.fromtimestamp(new_syncfiledata_remote.atime).strftime('%Y-%m-%d %H:%M:%S.%f'))
+          self.queue.append(synctask(relative_path, self.syncactions.cp_remote))
+        else: # otherwise just update if it was not tracked before
+          logger.debug("lazysync::find_changes() path_local is a symlink to path_remote, no changes needed")
+          if(relative_path not in self.files):
+            self.files[relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
       elif(new_syncfiledata_remote.equal_without_atime(new_syncfiledata_local)):
         logger.debug("lazysync::find_changes() equal")
-        self.files[relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
+        if(relative_path not in self.files):
+          self.files[relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
       else:
         if(new_syncfiledata_remote.mtime > new_syncfiledata_local.mtime):
           logger.debug("lazysync::find_changes() NOT equal; task: ln remote local")
@@ -379,7 +392,10 @@ class lazysync:
     path_remote = os.path.join(self.config['remote'], relative_path)
     path_local = os.path.join(self.config['local'], relative_path)
     
-    # TODO clear potential local symlink; handle folders, files, symlinks
+    if(os.path.isfile(path_remote)): # only handle files, everything else should be handled by action_ln_remote()
+      if(os.path.islink(path_local)):
+        self.action_rm(self.config['local'], relative_path)
+      shutil.copy2(path_remote, path_local)
     
   #
   def action_ln_remote(self, relative_path):
