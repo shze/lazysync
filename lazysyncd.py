@@ -250,6 +250,8 @@ class lazysync:
       for file in existing_backup_files:
         logger.debug("lazysync::load_data() removing backup file '%s', backup data is missing", file)
         os.remove(file)
+        
+    self.save_data() # save after making sure backup files are consistent
   
   #
   def save_data(self):
@@ -278,8 +280,8 @@ class lazysync:
     return filtered
     
   #
-  def queue_remote_change(self, relative_path):
-    logger.debug("lazysync::queue_remote_change()")
+  def queue_change_for_remote(self, relative_path):
+    logger.debug("lazysync::queue_change_for_remote()")
     if(relative_path in self.files):
       logger.debug("lazysync::find_changes() found locally removed relative_path: %s", relative_path)
       self.queue.append(synctask(relative_path, self.syncactions.rm_remote))
@@ -288,8 +290,8 @@ class lazysync:
       self.queue.append(synctask(relative_path, self.syncactions.ln_remote))
   
   #
-  def queue_local_change(self, relative_path):
-    logger.debug("lazysync::queue_local_change()")
+  def queue_change_for_local(self, relative_path):
+    logger.debug("lazysync::queue_change_for_local()")
     if(relative_path in self.files):
       logger.debug("lazysync::find_changes() found remotely removed relative_path: %s", relative_path)
       self.queue.append(synctask(relative_path, self.syncactions.rm_local))
@@ -321,8 +323,8 @@ class lazysync:
       
       if(os.path.islink(path_local) and os.path.realpath(path_local) == path_remote):
         logger.debug("lazysync::find_changes() path_local is a symlink to path_remote, no changes needed")
-        continue
-      if(new_syncfiledata_remote.equal_without_atime(new_syncfiledata_local)):
+        self.files[relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
+      elif(new_syncfiledata_remote.equal_without_atime(new_syncfiledata_local)):
         logger.debug("lazysync::find_changes() equal")
         self.files[relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
       else:
@@ -335,13 +337,13 @@ class lazysync:
       
     # *_only has to be added to self.queue, either to cp/ln if new, or to rm if old
     for relative_path in folders_remote_only: # for creating, do folders first, then files
-      self.queue_remote_change(relative_path)
+      self.queue_change_for_remote(relative_path)
     for relative_path in files_remote_only:
-      self.queue_remote_change(relative_path)
+      self.queue_change_for_remote(relative_path)
     for relative_path in folders_local_only:
-      self.queue_local_change(relative_path)
+      self.queue_change_for_local(relative_path)
     for relative_path in files_local_only:
-      self.queue_local_change(relative_path)
+      self.queue_change_for_local(relative_path)
       
   #
   def action_cp_local(self, relative_path):
@@ -399,12 +401,23 @@ class lazysync:
       os.remove(original_path) # symlinks are not backed up
     elif(os.path.isdir(original_path)):
       logger.debug("lazysync::action_rm() rm dir")
-      # TODO for every path in dir action_rm(path)
-    else:
-      hashed_filename = hashlib.sha1(relative_path.encode()).hexdigest()
+      # remove dir contents recursively
+      for dirpath, dirnames, filenames in os.walk(original_path):
+        relative_dirpath = os.path.relpath(dirpath, prefix)
+        for dirname in dirnames:
+          logger.debug("lazysync::action_rm() recursively rm '%s'", os.path.join(relative_dirpath, dirname))
+          self.action_rm(prefix, os.path.join(relative_dirpath, dirname))
+        for filename in filenames: 
+          logger.debug("lazysync::action_rm() recursively rm '%s'", os.path.join(relative_dirpath, filename))
+          self.action_rm(prefix, os.path.join(relative_dirpath, filename))
+      # remove dir
+      os.rmdir(original_path)
+    elif(os.path.isfile(original_path)): # make sure file still exists and was not deleted recursively in a subdir
+      hash_input = relative_path + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+      hashed_filename = hashlib.sha1(hash_input.encode()).hexdigest()
       backup_path = os.path.join(prefix, backup_dir, hashed_filename)
       
-      logger.debug("lazysync::action_rm() rm file, back up in '%s'", backup_path)
+      logger.debug("lazysync::action_rm() rm file, back up in '%s' (hash_input='%s')", backup_path, hash_input)
       shutil.move(original_path, backup_path)
       self.backup_files[original_path].append(backupfiledata(backup_path))
       self.save_data()
@@ -442,6 +455,9 @@ class lazysync:
       
       start_time = timeit.default_timer()
       
+      for k in self.files:
+        logger.debug("lazysync::loop() self.files.path=%s", k)
+        
       if(not self.queue and self.sleep_time == 0): # check filesystem if queue is empty and waiting time is up
         self.find_changes()
       if(self.queue): # process any changes that are left
