@@ -9,46 +9,42 @@ Syncs two folders lazily.
 
 ## Requirements
 
-* Pyinotify
-* Enum34 for testing
+* enum34
+* xdg
+* jsonpickle
 
 ## How to run
 
 ## Status
 
-* Syncing only works for folders and files, including symlinks, when both remote and local path are on a 
-  local filesystem.
-  * Symlinks with a target within 'remote' or 'local' should be synced as symlinks with targets within 
-    'local' or 'remote'; this also syncs dead symlinks.
-  * Empty files are not downloaded in lazy mode, only symlinked.
-* Known problems:
-  * inotify does not emit events for remote filesystems, which make this approach unusable.
+* Syncing works for folders and files.
+* Problems:
   * Relative symlinks local -> remote are not updated. (LazySync creates symlinks with absolute paths.)
-  * More tests are needed. Currently untested: unmounting remote or local while LazySync is running.
-* Not implemented:
+* To Do:
+  * Syncing (user created) symlinks.
+  * Non-lazy syncing.
+  * Dry-run mode.
   * Size limit for downloaded files.
   * Daemonization, definition of API for controling the daemin, implementation of a client.
-
-## To Do
-
-## Technical Information
+  * Tests.
 
 ### Syncing lazily
 
 * Syncing lazily works by creating symlinks in the 'local' folder that point to the corresponding file in 
   the 'remote' folder. This avoids downloading files whoses content is not needed (yet).
-* Symlinks that have a target are treated as special case and a remote/file <- remote/link will be synced 
-  as remote/file <- local/file <- local/link and not as remote/file <- local/file and 
-  remote/link <- local/link.
-* If a file is read in the 'local' folder and therefore downloaded, the symlink is replaced with a copy of 
-  the file contents until it is changed in the 'remote' folder.
+* If a file is read, it is downloaded, the symlink is replaced with a copy of the file contents. That a file is read is
+  determined by an updated atime of the remote file. (This means reading a file can be faked by 'touch'ing the file.)
+* The local copy of the file is kept until a change to the 'remote' file occurs, at which point the local copy is 
+  replaced by a symlink.
 
-### Design
+## Technical Information
 
-* Use inotify (pyinotify) instead of scanning directory hierarchies every time. Based on events, the 
+* Inotify does not emit events for remote filesystems, which make the inotify approach unusable.
+* This leaves scanning the filesystem as the only option.
+* Based on the differences of a filesystem scan compared to the tracking information stored from the last scan, the 
   following actions are implemented:
   
-  1. Accessing existing files
+  1. Accessing (in both sync paths) existing files
      * remote: do nothing
      * local: download
   2. Change files (dirs)

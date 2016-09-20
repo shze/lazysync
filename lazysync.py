@@ -1,11 +1,15 @@
 #!/usr/bin/env python
 
 from __future__ import print_function
-from collections import deque # implements atomic append() and popleft() that do not require locking
-import signal, argparse, os, sys, pyinotify, time, shutil, logging, datetime, filecmp, stat
+from collections import deque, defaultdict
+import logging, argparse, os, sys, datetime, time, timeit, signal, stat, math, shutil, xdg.BaseDirectory, hashlib, errno
+import jsonpickle, enum # enum is enum34
 
-# global variable to check for sigint
-sigint = False 
+# global variables
+sigint = False # variable to check for sigint
+min_sleep = 1.9 # seconds
+app_identifier = "lazysync" # used for all paths
+backup_dir = '.%s' % (app_identifier) # to store old files for specific sync paths
 # set up logging
 logger = logging.getLogger(os.path.basename(sys.argv[0]))
 logger.setLevel(logging.DEBUG)
@@ -18,14 +22,12 @@ def sigint_handler(signal, frame):
   logger.debug("sigint_handler()")
   global sigint
   sigint = True
-
-# TODO allow human readable limits
-def get_config():
-  logger.debug("get_config()")
+  
+#
+def get_default_config():
+  logger.debug("get_default_config()")
   return {
-    'dry-run': False,
-    'lazy': True,
-    'local_storage_limit': 100000000 # ~100MB
+    'ignore' : [backup_dir] # relative paths
   }
 
 # parse the folders to sync from the command line arguments
@@ -34,22 +36,27 @@ def parse_command_line():
   parser = argparse.ArgumentParser(description = 'Syncs lazily a remote folder and a local folder')
   parser.add_argument('-r', '--remote', required = True)
   parser.add_argument('-l', '--local', required = True)
-  parser.add_argument('-d', '--dryrun', action = 'store_true') # store_true means it's True if the flag is found
-  parser.add_argument('-n', '--nolazy', action = 'store_true') # store_true means it's True if the flag is found
   args = parser.parse_args()
   return {
     'remote': os.path.abspath(args.remote), 
-    'local': os.path.abspath(args.local),
-    'dry-run': args.dryrun,
-    'lazy': not args.nolazy
+    'local': os.path.abspath(args.local)
   }
 
-# Given two dicts, merge them into a new dict as a shallow copy; see http://stackoverflow.com/questions/38987/
-def merge_two_dicts(x, y):
-  logger.debug("merge_two_dicts()")
-  z = x.copy()
-  z.update(y) # keys in y overwrite existing keys in x/z!
-  return z
+# merge two dicts; if key is in both and data is list or dict, merge; else overwrite default_dct with dct
+def merge_two_dicts(dct, default_dct):
+  final_dct = {}
+  for k in set(dct).union(default_dct): # for all keys
+    # if k is in both dicts, and data is list or dict, merge
+    if k in dct and k in default_dct and isinstance(dct[k], list) and isinstance(default_dct[k], list):
+      final_dct[k] = dct[k] + default_dct[k]
+    elif k in dct and k in default_dct and isinstance(dct[k], dict) and isinstance(default_dct[k], dict):
+      final_dct[k] = merge_two_dicts(dct[k], default_dct[k])
+    # if k is not in both, use dct first, and default_dct second
+    elif k in dct:
+      final_dct[k] = dct[k]
+    else:
+      final_dct[k] = default_dct[k]
+  return final_dct
 
 # walk all files and folders recursively starting at root_folder; all files and folders are relative to root_folder
 def relative_walk(root_folder):
@@ -65,369 +72,435 @@ def relative_walk(root_folder):
   return folders, files
 
 #
-def fast_file_cmp(file1, file2):
-  s1 = filecmp._sig(os.stat(file1))
-  s2 = filecmp._sig(os.stat(file2))
-  if s1[0] != stat.S_IFREG or s2[0] != stat.S_IFREG:
-    return False
-  if s1 == s2:
-    return True
-  if s1[1] != s2[1]:
-    return False
-  return True # always shallow, see: stackoverflow.com/questions/23192359/
+def list_files(path):
+  logger.debug("list_files() path='%s'", path)
+  if(os.path.exists(path)):
+    return [os.path.join(path, f) for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))] 
+  else:
+    return []
 
 #
-def files_identical(path1, path2):
-  logger.debug("files_identical() path1='%s' path2='%s'", path1, path2)
-  if(not os.path.exists(path1) or not os.path.exists(path2)):
-    return False
-  return fast_file_cmp(path1, path2)
+def make_sure_path_exists(path):
+  logger.debug("make_sure_path_exists()")
+  try:
+    os.makedirs(path)
+  except OSError as e:
+    if e.errno == errno.EEXIST and os.path.isdir(path):
+      pass
+    else:
+      raise
 
 #
-def path_or_link_exists(path):
-  logger.debug("path_or_link_exists() path='%s'", path)
-  return os.path.lexists(path)
+def read_file_contents(path):
+  logger.debug("read_file_contents()")
+  f = open(path, 'r')
+  contents = f.read()
+  f.close()
+  return contents
 
 #
-def local_is_symlink_to_remote(local_filename, remote_filename):
-  logger.debug("local_is_symlink_to_remote() local_filename='%s' remote_filename='%s'", local_filename, remote_filename)
-  return os.path.islink(local_filename) and os.readlink(local_filename) == remote_filename
+def write_file_contents(path, contents):
+  logger.debug("write_file_contents()")
+  f = open(path, 'w')
+  f.write(contents)
+  f.close()
 
 #
 class synctask:
   #
-  def __init__(self, path, event_mask):
+  def __init__(self, relative_path, action):
     logger.debug("synctask::__init__()")
+    self.relative_path = relative_path
+    self.action = action
+    
+# stores the metadata for one file; contains no path
+class syncfiledata:
+  #
+  def __init__(self, path):
+    logger.debug("syncfiledata::__init__()")
+    statinfo = os.lstat(path)
+    # TODO add content hash
+    self.is_dir = stat.S_ISDIR(statinfo.st_mode)
+    self.is_file = stat.S_ISREG(statinfo.st_mode)
+    self.is_link = stat.S_ISLNK(statinfo.st_mode)
+    self.atime = statinfo.st_atime
+    self.mtime = statinfo.st_mtime
+    self.size = statinfo.st_size
+    
+  # return if two syncfiledatas are equal without looking at the atime; don't look at mtime or size for directories
+  def equal_without_atime(self, other):
+    logger.debug("syncfiledata::equal_without_atime() self={%s}", self)
+    logger.debug("syncfiledata::equal_without_atime() other={%s}", other)
+    
+    equal_is_dir = self.is_dir == other.is_dir
+    equal_is_file = self.is_file == other.is_file
+    equal_is_link = self.is_link == other.is_link
+    # dir mtime changes when contents change, i.e. on every file sync -> avoid having to sync dir mtime everytime by not 
+    # comparing mtime for dirs
+    equal_mtime = math.floor(self.mtime) == math.floor(other.mtime) or self.is_dir
+    equal_size = self.size == other.size or self.is_dir
+    all_equal = equal_is_dir and equal_is_file and equal_is_link and equal_mtime and equal_size
+    
+    logger.debug("syncfiledata::equal_without_atime() equal=%s (is_dir=%s, is_file=%s, is_link=%s, mtime=%s, size=%s)", 
+                 all_equal, equal_is_dir, equal_is_file, equal_is_link, equal_mtime, equal_size)
+    return all_equal;
+  
+  #
+  def __str__(self):
+    return "is_dir=%s, is_file=%s, is_link=%s, atime=%f (%s), mtime=%f (%s), size=%s" \
+        % (self.is_dir, self.is_file, self.is_link, 
+           self.atime, datetime.datetime.fromtimestamp(self.atime).strftime('%Y-%m-%d %H:%M:%S.%f'), 
+           self.mtime, datetime.datetime.fromtimestamp(self.mtime).strftime('%Y-%m-%d %H:%M:%S.%f'),
+           self.size)
+      
+# stores the metadata for a pair of synced files; contains no path
+class syncfilepair:
+  #
+  def __init__(self, syncfiledata_remote, syncfiledata_local):
+    logger.debug("syncfilepair::__init__()")
+    self.syncfiledata_remote = syncfiledata_remote
+    self.syncfiledata_local = syncfiledata_local
+
+#
+class backupfiledata:
+  #
+  def __init__(self, path):
     self.path = path
-    self.event_mask = event_mask
-    pass
+    self.time = datetime.datetime.now()
 
 # lazily syncs two folders with the given config parameters
-class lazysync(pyinotify.ProcessEvent):
+class lazysync:
   # initialize object
   def __init__(self, config):
     logger.debug("lazysync::__init__()")
     self.config = config
-    self.queue = deque()
-    self.file_access = {}
-    self.wm = pyinotify.WatchManager()
-    self.notifier = pyinotify.ThreadedNotifier(self.wm, self)
-    self.notifier.start()
-    self.mask = pyinotify.IN_ACCESS | pyinotify.IN_DELETE | pyinotify.IN_CREATE | pyinotify.IN_CLOSE_WRITE
-    
-  # sync directionally from_dir -> to_dir
-  def sync_one_way(self, from_dir, to_dir):
-    logger.debug("lazysync::sync_one_way() from_dir='%s' to_dir='%s'", from_dir, to_dir)
-    
-    from_folder_set, from_file_set = relative_walk(from_dir) 
-    to_folder_set, to_file_set = relative_walk(to_dir)
-    folder_difference = from_folder_set - to_folder_set # folders only in from_folder_set: need to be copied
-    folder_intersection = from_folder_set & to_folder_set # set of folders in both sets: assume they're identical
-    file_difference = from_file_set - to_file_set # files only in from_file_set: need to be copied/symlinked
-    file_intersection = from_file_set & to_file_set # set of files in both sets: need to check details (size, etc.)
-        
-    logger.debug("lazysync::sync_one_way() folders_diff.len=%s folder_intersect.len=%d file_diff.len=%d file_intersect.len=%d", 
-                 len(folder_difference), len(folder_intersection), len(file_difference), len(file_intersection))
-    return folder_difference, folder_intersection, file_difference, file_intersection
-  
-  # initialize local folder, then turn on inotify for it
-  def initialize_local(self):
-    logger.info("lazysync::initialize_local()")
-    # sync remote -> local
-    while True: # emulate do while loop
-      folder_diff, folder_intersect, file_diff, file_intersect = self.sync_one_way(self.config['remote'], self.config['local']) 
-      for relative_path in file_intersect:
-        remote_path = os.path.join(self.config['remote'], relative_path)
-        local_path = os.path.join(self.config['local'], relative_path)
-        if(not files_identical(remote_path, local_path)):
-          logger.warning("lazysync::initialize_local() file '%s' differs between local and remote! NOT SYNCING!", relative_path)
-      for relative_path in folder_diff:
-        self.queue.append(synctask(os.path.join(self.config['remote'], relative_path), pyinotify.IN_CREATE | pyinotify.IN_ISDIR))
-      for relative_path in file_diff:
-        self.queue.append(synctask(os.path.join(self.config['remote'], relative_path), pyinotify.IN_CREATE))
-      self.process_queue()
-      if(len(folder_diff) + len(file_diff) == 0 or self.config['dry-run']):
-        break
-    # turn on inotify on local
-    self.watch_local = self.wm.add_watch(self.config['local'], self.mask, rec=True, auto_add=True)
-  
-  # initialize remote folder, then turn on inotify for it
-  def initialize_remote(self):
-    logger.info("lazysync::initialize_remote()")
-    # sync local -> remote
-    while True: # emulate do while loop
-      folder_diff, folder_intersect, file_diff, file_intersect = self.sync_one_way(self.config['local'], self.config['remote'])
-      for relative_path in file_intersect:
-        remote_path = os.path.join(self.config['remote'], relative_path)
-        local_path = os.path.join(self.config['local'], relative_path)
-        if(not files_identical(remote_path, local_path)):
-          logger.warning("lazysync::initialize_remote() file '%s' differs between local and remote! NOT SYNCING!", relative_path)
-      for relative_path in folder_diff:
-        self.queue.append(synctask(os.path.join(self.config['local'], relative_path), pyinotify.IN_CREATE | pyinotify.IN_ISDIR))
-      for relative_path in file_diff:
-        self.queue.append(synctask(os.path.join(self.config['local'], relative_path), pyinotify.IN_CREATE))
-      self.process_queue()
-      if(len(folder_diff) + len(file_diff) == 0 or self.config['dry-run']):
-        break
-    # turn on inotify on remote
-    self.watch_remote = self.wm.add_watch(self.config['remote'], self.mask, rec=True, auto_add=True)
-    
-  # collect inotify events; redefined method from base class
-  def process_default(self, event):
-    logger.debug("lazysync::process_default() filename='%s' event='%s'", event.pathname, event.maskname)
-    self.queue.append(synctask(event.pathname, event.mask))
+    self.queue = deque() # queue of synctasks
+    self.files = {} # dictionary of path -> syncfilepair to keep track of atimes and deleted files
+    self.backup_files = defaultdict(list) # dictionary of original_path -> [backupfiledata] to keep deleted files
+    self.sleep_time = 0
+    self.syncactions = enum.Enum('syncactions', 'cp_local cp_remote ln_remote rm_local rm_remote')
+    self.syncaction_functions = {self.syncactions.cp_local: self.action_cp_local,
+                                 self.syncactions.cp_remote: self.action_cp_remote,
+                                 self.syncactions.ln_remote: self.action_ln_remote,
+                                 self.syncactions.rm_local: self.action_rm_local,
+                                 self.syncactions.rm_remote: self.action_rm_remote}
 
-  # file: download
-  def action_remote_access_file(self, relative_path):
-    logger.debug("lazysync::action_remote_access_file() relative_path='%s'", relative_path) 
-    if(self.config['dry-run']):
-      logger.warning("lazysync::action_remote_access_file() download '%s' (dry-run)", relative_path)
-      return 
-    local_filename = os.path.join(self.config['local'], relative_path)
-    remote_filename = os.path.join(self.config['remote'], relative_path)
-    if(local_is_symlink_to_remote(local_filename, remote_filename)):
-      if(relative_path in self.file_access.keys()):
-        # one file access event is created every ~160kB read, i.e. count * 160kB is roughly the read amount, at least
-        # when read in a short time (repeatedly calling stat on a file or refreshing your file viewer might create access 
-        # events, but only one; that's why we downweigh accesses here that are older than 10s
-        seconds_since_last_acccess = time.time() - self.file_access[relative_path]['time']
-        old_count_factor = max(0, 1 - seconds_since_last_acccess * 0.1) # becomes zero for accesses older than 10s
-        self.file_access[relative_path]['count'] = 1 + old_count_factor * self.file_access[relative_path]['count']
-        self.file_access[relative_path]['time'] = time.time()
-      else:
-        self.file_access[relative_path] = {'count': 1, 'time': time.time()} # unix time
-        
-      logger.debug("lazysync::action_remote_access_file() file=%s count=%f", relative_path, self.file_access[relative_path]['count'])
-      
-      # download if we're not in lazy mode, or if enough of a file was read; enough is semi-arbitrarily set to 45%, b/c:
-      # * files with <=2 chunks of 160kB will always be downloaded, even on a single access event (small, should be fast)
-      # * larger files will be downloaded after when they reach 45% of the size/160kB in access events
-      if(not self.config['lazy'] or self.file_access[relative_path]['count'] * 160000 > os.path.getsize(remote_filename) * 0.45):
-        logger.warning("lazysync::action_remote_access_file() download '%s'", relative_path)
-        self.file_access.pop(relative_path) # remove key from dict
-        os.remove(local_filename) # will trigger delete
-        shutil.copy2(remote_filename, local_filename) # will trigger create and modify
-        logger.warning("lazysync::action_remote_access_file() download '%s' finished", relative_path)
-        # TODO update current local storage size
-      
-    else:
-      # access to remote could be writing, but if it is we'll also see IN_CLOSE_WRITE for remote/file when it's done
-      # so no need to warn here
-      pass
-
-  # dir: mkdir
-  def action_local_create_dir(self, relative_path):
-    logger.info("lazysync::action_local_create_dir() relative_path='%s'", relative_path)
-    remote_path = os.path.join(self.config['remote'], relative_path)
-    if(path_or_link_exists(remote_path)):
-      logger.debug("lazysync::action_local_create_dir() remote path already exists, nothing to do.")
-      return
-    logger.warning("lazysync::action_local_create_dir() create dir '%s' %s", remote_path, "(dry-run)" if self.config['dry-run'] else "")
-    if(self.config['dry-run']):
-      return 
-    os.makedirs(remote_path) # wills trigger create
-
-  # dir: mkdir
-  def action_remote_create_dir(self, relative_path):
-    logger.info("lazysync::action_remote_create_dir() relative_path='%s'", relative_path)
-    local_path = os.path.join(self.config['local'], relative_path)
-    if(path_or_link_exists(local_path)):
-      logger.debug("lazysync::action_remote_create_dir() local path already exists, nothing to do.")
-      return 
-    logger.warning("lazysync::action_remote_create_dir() create dir '%s' %s", local_path, "(dry-run)" if self.config['dry-run'] else "")
-    if(self.config['dry-run']):
-      return 
-    os.makedirs(local_path) # will trigger create
-    
-  # file: upload 
-  def action_local_create_modify_file(self, relative_path):
-    logger.info("lazysync::action_local_create_modify_file() relative_path='%s'", relative_path)
-    remote_path = os.path.join(self.config['remote'], relative_path)
-    local_path = os.path.join(self.config['local'], relative_path)
-
-    # symlinks with target within local
-    if(os.path.islink(local_path) and os.path.realpath(local_path).startswith(self.config['local'])):
-      logger.info("lazysync::action_local_create_modify_file() local path is a symlink within local, creating relative symlink in remote.")
-      local_link_target = os.path.realpath(local_path)
-      relative_link_target = os.path.relpath(local_link_target, self.config['local'])
-      logger.warning("lazysync::action_local_create_modify_file() symlink '%s' -> '%s' %s", remote_path, relative_link_target, "(dry-run)" if self.config['dry-run'] else "")
-      if(self.config['dry-run']):
-        return 
-      if(path_or_link_exists(remote_path)):
-        os.remove(remote_path)
-      os.symlink(relative_link_target, remote_path)
-      
-    # broken symlinks local -> target 
-    elif(os.path.islink(local_path) and os.path.realpath(local_path).startswith(self.config['remote']) and not os.path.exists(local_path)):
-      logger.warning("lazysync::action_local_create_modify_file() removing broken symlink '%s' -> '%s'", local_path, os.path.realpath(local_path))
-      os.remove(local_path)
-    
-    # all other files and symlinks
-    else:
-      logger.info("lazysync::action_local_create_modify_file() local path is not a symlink within local, uploading local path.")
-      if(files_identical(remote_path, local_path)):
-        logger.info("lazysync::action_local_create_modify_file() remote and local files are identical, no need to modify local path.")
-        return 
-      logger.warning("lazysync::action_local_create_modify_file() upload '%s' %s", local_path, "(dry-run)" if self.config['dry-run'] else "")
-      if(self.config['dry-run']):
-        return 
-      if(path_or_link_exists(remote_path)):
-        os.remove(remote_path) # will trigger delete
-      shutil.copy2(local_path, remote_path) # will trigger create and modify
-      # TODO update current local storage size
-
-  # file: symlink
-  def action_remote_create_modify_file(self, relative_path):
-    logger.info("lazysync::action_remote_create_modify_file() relative_path='%s'", relative_path)
-    remote_path = os.path.join(self.config['remote'], relative_path)
-    local_path = os.path.join(self.config['local'], relative_path)
-    
-    # symlinks with target within remote
-    if(os.path.islink(remote_path) and os.path.realpath(remote_path).startswith(self.config['remote'])):
-      logger.info("lazysync::action_remote_create_modify_file() remote path is a symlink within remote, creating relative symlink in local.")
-      remote_link_target = os.path.realpath(remote_path)
-      relative_link_target = os.path.relpath(remote_link_target, self.config['remote'])
-      logger.warning("lazysync::action_remote_create_modify_file() symlink '%s' -> '%s' %s", local_path, relative_link_target, "(dry-run)" if self.config['dry-run'] else "")
-      if(self.config['dry-run']):
-        return 
-      if(path_or_link_exists(local_path)):
-        os.remove(local_path)
-      os.symlink(relative_link_target, local_path)
-    
-    # all other files and symlinks
-    else:
-      logger.info("lazysync::action_remote_create_modify_file() remote path is not a symlink within remote, downloading/symlinking remote path.")
-      # ignore if local file is symlink, b/c it automatically has the modifications
-      if(local_is_symlink_to_remote(local_path, remote_path)):
-        logger.info("lazysync::action_remote_create_modify_file() local path is symlink, no need to modify local path.")
-        return 
-      if(files_identical(remote_path, local_path)):
-        logger.info("lazysync::action_remote_create_modify_file() remote and local files are identical, no need to modify local path.")
-        return 
-      logger.warning("lazysync::action_local_create_modify_file() symlink '%s' -> '%s' %s", local_path, remote_path, "(dry-run)" if self.config['dry-run'] else "")
-      if(self.config['dry-run']):
-        return 
-      if(path_or_link_exists(local_path)):
-        os.remove(local_path)
-      os.symlink(remote_path, local_path)
-      
-      # if we're not in lazy mode, symlink quickly first, then create an access event to download the file
-      if(not self.config['lazy']):
-        logger.debug("lazysync::action_remote_create_modify_file() not in lazy mode, create IN_ACCESS event to download")
-        self.queue.append(synctask(os.path.join(self.config['remote'], relative_path), pyinotify.IN_ACCESS)) 
-      
-  # dir: rmdir; file: rm
-  def action_local_delete(self, relative_path):
-    logger.info("lazysync::action_local_delete() relative_path='%s'", relative_path)
-    remote_path = os.path.join(self.config['remote'], relative_path)
-    local_path = os.path.join(self.config['local'], relative_path)
-    # do not delete, if both exist b/c then the delete event is a result of another event/operation
-    if(path_or_link_exists(remote_path) and path_or_link_exists(local_path)): 
-      logger.debug("lazysync::action_local_delete() both remote and local paths exist, won't delete.")
-      return
-    # check in case the IN_DELETE for local/file is the result of action_remote_delete() deleting local/file
-    if(not path_or_link_exists(remote_path)): 
-      logger.debug("lazysync::action_local_delete() remote path does not exist, won't delete.")
-      return
-    logger.warning("lazysync::action_local_delete() delete '%s' %s", remote_path, "(dry-run)" if self.config['dry-run'] else "")
-    if(self.config['dry-run']):
-      return 
-    if(os.path.isdir(remote_path)):
-      os.rmdir(remote_path)
-    else:
-      os.remove(remote_path)
-      # TODO update current local storage size
-
-  # dir: rmdir; file: rm
-  def action_remote_delete(self, relative_path):
-    logger.info("lazysync::action_remote_delete() relative_path='%s'", relative_path)
-    remote_path = os.path.join(self.config['remote'], relative_path)
-    local_path = os.path.join(self.config['local'], relative_path)
-    # do not delete, if both exist b/c then the delete event is a result of another event/operation
-    if(path_or_link_exists(remote_path) and path_or_link_exists(local_path)): 
-      logger.debug("lazysync::action_local_delete() both remote and local paths exist, won't delete.")
-      return
-    # check in case the IN_DELETE for remote/file is the result of action_local_delete() deleting remote/file
-    if(not path_or_link_exists(local_path)):
-      logger.debug("lazysync::action_remote_delete() local path does not exist, won't delete.")
-      return
-    logger.warning("lazysync::action_remote_delete() delete '%s' %s", local_path, "(dry-run)" if self.config['dry-run'] else "")
-    if(self.config['dry-run']):
-      return 
-    if(os.path.isdir(local_path)):
-      os.rmdir(local_path)
-    else:
-      os.remove(local_path)
-      # TODO update current local storage size
+    path_pair = self.config['remote'] + '?' + self.config['local']
+    self.hashed_path_pair = hashlib.sha1(path_pair.encode()).hexdigest()
+    self.load_data()
     
   # 
-  def process_event(self, synctask):
-    logger.debug("lazysync::process_event() pathname='%s' mask='%s'", synctask.path, pyinotify.EventsCodes.maskname(synctask.event_mask))
-    if(synctask.event_mask & pyinotify.IN_ACCESS):
-      if(not synctask.event_mask & pyinotify.IN_ISDIR): # ignore accessing directories
-        # look for remote/file access: if local/file symlinks to remote/file, no IN_ACCESS event is generated for local/file
-        if(synctask.path.startswith(self.config['remote'])): 
-          relative_filename = os.path.relpath(synctask.path, self.config['remote'])
-          self.action_remote_access_file(relative_filename)
-    elif(synctask.event_mask & pyinotify.IN_CREATE):
-      if(synctask.event_mask & pyinotify.IN_ISDIR): 
-        if(synctask.path.startswith(self.config['local'])):
-          relative_path = os.path.relpath(synctask.path, self.config['local'])
-          self.action_local_create_dir(relative_path)
-        else:
-          relative_path = os.path.relpath(synctask.path, self.config['remote'])
-          self.action_remote_create_dir(relative_path)
-      else: # files: symlinks will only trigger IN_CREATE, files will additionally trigger IN_CLOSE_WRITE
-        if(synctask.path.startswith(self.config['local'])):
-          relative_path = os.path.relpath(synctask.path, self.config['local'])
-          self.action_local_create_modify_file(relative_path)
-        else:
-          relative_path = os.path.relpath(synctask.path, self.config['remote'])
-          self.action_remote_create_modify_file(relative_path)
-    elif(synctask.event_mask & pyinotify.IN_CLOSE_WRITE):
-      if(not synctask.event_mask & pyinotify.IN_ISDIR): # ignore directories
-        if(synctask.path.startswith(self.config['local'])): # local file modified
-          relative_path = os.path.relpath(synctask.path, self.config['local'])
-          self.action_local_create_modify_file(relative_path)
-        else: # remote file modified
-          relative_path = os.path.relpath(synctask.path, self.config['remote'])
-          self.action_remote_create_modify_file(relative_path)
-      pass
-    elif(synctask.event_mask & pyinotify.IN_DELETE):
-      if(synctask.path.startswith(self.config['local'])):
-        relative_path = os.path.relpath(synctask.path, self.config['local'])
-        self.action_local_delete(relative_path)
-      else:
-        relative_path = os.path.relpath(synctask.path, self.config['remote'])
-        self.action_remote_delete(relative_path)
+  def wait_for_sync_paths(self):
+    logger.debug("lazysync::wait_for_sync_paths()")
+    while(not sigint and not (os.path.isdir(self.config['remote']) and os.path.isdir(self.config['local']))):
+      logger.debug("lazysync::wait_for_backup_paths() waiting for backup folders to be accessible")
+      time.sleep(min_sleep * 2)
   
   #
-  def process_queue(self):
-    logger.info("lazysync::process_queue() len=%d", len(self.queue))
-    while(self.queue and not sigint): # check sigint here too to avoid long processing times before exiting
-      self.process_event(self.queue.popleft())
+  def wait_for_backup_paths(self):
+    logger.debug("lazysync::wait_for_backup_paths()")
+    remote_backup_dir = os.path.join(self.config['remote'], backup_dir)
+    local_backup_dir = os.path.join(self.config['local'], backup_dir)
+    while(not sigint and not (os.path.isdir(remote_backup_dir) and os.path.isdir(local_backup_dir))):
+      logger.debug("lazysync::wait_for_backup_paths() waiting for backup folders to be accessible")
+      time.sleep(min_sleep * 2)
+    
+  #
+  def first_time_setup(self):
+    logger.debug("lazysync::first_time_setup()")
+    self.wait_for_sync_paths()
+    self.save_data()
+    
+  #
+  def load_data(self):
+    logger.debug("lazysync::load_data()")
+    data_paths = list(xdg.BaseDirectory.load_data_paths(app_identifier))
+    if(not data_paths):
+      self.first_time_setup()
+      return 
+      
+    config_path = os.path.join(data_paths[0], self.hashed_path_pair)
+    if(os.path.isfile(config_path)): # file exists, i.e. sync was setup before
+      logger.debug("lazysync::load_data() reading config from '%s'", config_path)
+      self.backup_files = jsonpickle.decode(read_file_contents(config_path))[0]
+      
+      # get existing_backup_files
+      self.wait_for_backup_paths() # make sure backup paths are available
+      remote_backup_dir = os.path.join(self.config['remote'], backup_dir)
+      local_backup_dir = os.path.join(self.config['local'], backup_dir)
+      existing_backup_files = list_files(remote_backup_dir) + list_files(local_backup_dir)
+      logger.debug("lazysync::load_data() existing_backup_files=%s", existing_backup_files)
+      # make sure backup_files is consistent with existing_backup_files
+      backup_files_to_be_deleted = defaultdict(list)
+      for original_path in self.backup_files:
+        for backup_file in self.backup_files[original_path]:
+          if os.path.isfile(backup_file.path): # check that file in backup_files exists
+            existing_backup_files.remove(backup_file.path) # remove it from existing_backup_files
+            logger.debug("lazysync::load_data() found backup file '%s' -> '%s' (%s)", original_path, backup_file.path, 
+                         backup_file.time)
+          else: # file does not exist
+            backup_files_to_be_deleted[original_path].append(backup_file) # store to remove after iteration
+      # remove backup_files that have missing files      
+      for original_path in backup_files_to_be_deleted:
+        for backup_file in backup_files_to_be_deleted[original_path]:
+          self.backup_files[original_path].remove(backup_file)
+          logger.debug("lazysync::load_data() removing data for '%s' -> '%s' (%s), backup file is missing", 
+                       original_path, backup_file.path, backup_file.time)
+      # remove existing_backup_files that have no data in backup_files
+      for file in existing_backup_files:
+        logger.debug("lazysync::load_data() removing backup file '%s', backup data is missing", file)
+        os.remove(file)
+        
+    self.save_data() # save after making sure backup files are consistent
+  
+  #
+  def save_data(self):
+    logger.debug("lazysync::save_data()")
+    data_path = xdg.BaseDirectory.save_data_path(app_identifier) # makes sure dir exists
+    make_sure_path_exists(os.path.join(self.config['remote'], backup_dir)) # remote backup dir
+    make_sure_path_exists(os.path.join(self.config['local'], backup_dir)) # local backup dir
 
+    config_path = os.path.join(data_path, self.hashed_path_pair)
+    logger.debug("lazysync::save_data() writing config to '%s'", config_path)
+    write_file_contents(config_path, jsonpickle.encode([self.backup_files]))
+  
+  #
+  def filter_ignore(self, paths):
+    logger.debug("lazysync::filter_ignore()")
+    filtered = set()
+    ignored = set()
+    for p in paths:
+      for i in self.config['ignore']:
+        if p.startswith(i):
+          ignored.add(p)
+        else:
+          filtered.add(p)
+    
+    logger.debug("lazysync::filter_ignore() ignored=%s", ignored)
+    return filtered
+    
+  #
+  def queue_change_for_remote(self, relative_path):
+    logger.debug("lazysync::queue_change_for_remote()")
+    if(relative_path in self.files):
+      logger.debug("lazysync::find_changes() found locally removed relative_path: %s", relative_path)
+      self.queue.append(synctask(relative_path, self.syncactions.rm_remote))
+    else:
+      logger.debug("lazysync::find_changes() found new remote relative_path: %s", relative_path)
+      self.queue.append(synctask(relative_path, self.syncactions.ln_remote))
+  
+  #
+  def queue_change_for_local(self, relative_path):
+    logger.debug("lazysync::queue_change_for_local()")
+    if(relative_path in self.files):
+      logger.debug("lazysync::find_changes() found remotely removed relative_path: %s", relative_path)
+      self.queue.append(synctask(relative_path, self.syncactions.rm_local))
+    else:
+      logger.debug("lazysync::find_changes() found new local relative_path: %s", relative_path)
+      self.queue.append(synctask(relative_path, self.syncactions.cp_local))
+  
+  # 
+  def find_changes(self):
+    logger.debug("lazysync::find_changes()")
+    remote_folder_set, remote_file_set = relative_walk(self.config['remote']) 
+    local_folder_set, local_file_set = relative_walk(self.config['local'])
+    
+    # create sets of folders and files in both sets or in one set only; filter out ignored paths
+    folders_both = self.filter_ignore(remote_folder_set & local_folder_set) # check they are equal
+    folders_remote_only = self.filter_ignore(remote_folder_set - local_folder_set) # need to be copied
+    folders_local_only = self.filter_ignore(local_folder_set - remote_folder_set) # need to be copied
+    files_both = self.filter_ignore(remote_file_set & local_file_set) # check they are equal
+    files_remote_only = self.filter_ignore(remote_file_set - local_file_set) # need to be copied/symlinked
+    files_local_only = self.filter_ignore(local_file_set - remote_file_set) # need to be copied
+    
+    # folders_both and files_both need to be compared against self.files, and, if different, added to self.queue
+    for relative_path in folders_both | files_both: # for existing folders and files ordering them is not needed
+      logger.debug("lazysync::find_changes() found relative_path in both: %s", relative_path)
+      path_remote = os.path.join(self.config['remote'], relative_path)
+      path_local = os.path.join(self.config['local'], relative_path)
+      new_syncfiledata_remote = syncfiledata(path_remote)
+      new_syncfiledata_local = syncfiledata(path_local)
+      
+      if(os.path.islink(path_local) and os.path.realpath(path_local) == path_remote): # always to file, never to dir
+        # if the file was tracked before and it has been accessed since, download it
+        if(relative_path in self.files 
+           and self.files[relative_path].syncfiledata_remote.atime < new_syncfiledata_remote.atime):
+          logger.debug("lazysync::find_changes() remote has been accessed, old=%f (%s), new=%f (%s), downloading.", 
+                       self.files[relative_path].syncfiledata_remote.atime, 
+                       datetime.datetime.fromtimestamp(self.files[relative_path].syncfiledata_remote.atime).strftime(
+                         '%Y-%m-%d %H:%M:%S.%f'),
+                       new_syncfiledata_remote.atime, 
+                       datetime.datetime.fromtimestamp(new_syncfiledata_remote.atime).strftime('%Y-%m-%d %H:%M:%S.%f'))
+          self.queue.append(synctask(relative_path, self.syncactions.cp_remote))
+        else: # otherwise just update if it was not tracked before
+          logger.debug("lazysync::find_changes() path_local is a symlink to path_remote, no changes needed")
+          if(relative_path not in self.files):
+            self.files[relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
+      elif(new_syncfiledata_remote.equal_without_atime(new_syncfiledata_local)):
+        logger.debug("lazysync::find_changes() equal")
+        if(relative_path not in self.files):
+          self.files[relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
+      else:
+        if(new_syncfiledata_remote.mtime > new_syncfiledata_local.mtime):
+          logger.debug("lazysync::find_changes() NOT equal; task: ln remote local")
+          self.queue.append(synctask(relative_path, self.syncactions.ln_remote))
+        else:
+          logger.debug("lazysync::find_changes() NOT equal; task: cp local remote")
+          self.queue.append(synctask(relative_path, self.syncactions.cp_local))
+      
+    # *_only has to be added to self.queue, either to cp/ln if new, or to rm if old
+    for relative_path in folders_remote_only: # for creating, do folders first, then files
+      self.queue_change_for_remote(relative_path)
+    for relative_path in files_remote_only:
+      self.queue_change_for_remote(relative_path)
+    for relative_path in folders_local_only:
+      self.queue_change_for_local(relative_path)
+    for relative_path in files_local_only:
+      self.queue_change_for_local(relative_path)
+      
+  #
+  def update_file_tracking(self, relative_path):
+    logger.debug("lazysync::update_file_tracking() relative_path='%s'", relative_path)
+    new_syncfiledata_remote = syncfiledata(os.path.join(self.config['remote'], relative_path))
+    new_syncfiledata_local = syncfiledata(os.path.join(self.config['local'], relative_path))
+    self.files[relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
+      
+  #
+  def action_cp_local(self, relative_path):
+    logger.debug("lazysync::action_cp_local() relative_path='%s'", relative_path)
+    path_remote = os.path.join(self.config['remote'], relative_path)
+    path_local = os.path.join(self.config['local'], relative_path)
+    
+    if(os.path.islink(path_local)):
+      pass # TODO clear potential existing link; handle local links
+    elif(os.path.isdir(path_local)):
+      logger.debug("lazysync::action_cp_local() relative_path is dir, mkdir remote='%s'", path_remote)
+      os.makedirs(path_remote)
+      shutil.copystat(path_local, path_remote)
+    else:
+      logger.debug("lazysync::action_cp_local() relative_path is file, cp local='%s' remote='%s'", path_local, 
+                   path_remote)
+      if(os.path.lexists(path_remote)):
+        self.action_rm_remote(relative_path)
+      shutil.copy2(path_local, path_remote)
+
+    self.update_file_tracking(relative_path)
+
+  #
+  def action_cp_remote(self, relative_path):
+    logger.debug("lazysync::action_cp_remote() relative_path='%s'", relative_path)
+    path_remote = os.path.join(self.config['remote'], relative_path)
+    path_local = os.path.join(self.config['local'], relative_path)
+    
+    if(os.path.isfile(path_remote)): # only handle files, everything else should be handled by action_ln_remote()
+      if(os.path.islink(path_local)):
+        self.action_rm(self.config['local'], relative_path)
+      shutil.copy2(path_remote, path_local)
+    
+  #
+  def action_ln_remote(self, relative_path):
+    logger.debug("lazysync::action_ln_remote() relative_path='%s'", relative_path)
+    path_remote = os.path.join(self.config['remote'], relative_path)
+    path_local = os.path.join(self.config['local'], relative_path)
+    
+    if(os.path.islink(path_remote)):
+      pass # TODO clear potential existing link; handle local links
+    elif(os.path.isdir(path_remote)):
+      logger.debug("lazysync::action_ln_remote() relative_path is dir, mkdir local='%s'", path_local)
+      os.makedirs(path_local)
+      shutil.copystat(path_remote, path_local)
+    else:
+      logger.debug("lazysync::action_ln_remote() relative_path is file, ln -s remote='%s' local='%s'", path_remote, 
+                   path_local)
+      if(os.path.lexists(path_local)):
+        self.action_rm_local(relative_path)
+      os.symlink(path_remote, path_local)
+      
+    self.update_file_tracking(relative_path)
+      
+  #
+  def action_rm(self, prefix, relative_path):
+    logger.debug("lazysync::action_rm() prefix='%s' relative_path='%s'", prefix, relative_path)
+    original_path = os.path.join(prefix, relative_path)
+    
+    if(os.path.islink(original_path)):
+      logger.debug("lazysync::action_rm() rm symlink")
+      os.remove(original_path) # symlinks are not backed up
+      del self.files[relative_path]
+    elif(os.path.isdir(original_path)):
+      logger.debug("lazysync::action_rm() rm dir")
+      # remove dir contents recursively
+      for dirpath, dirnames, filenames in os.walk(original_path):
+        relative_dirpath = os.path.relpath(dirpath, prefix)
+        for dirname in dirnames:
+          logger.debug("lazysync::action_rm() recursively rm '%s'", os.path.join(relative_dirpath, dirname))
+          self.action_rm(prefix, os.path.join(relative_dirpath, dirname))
+        for filename in filenames: 
+          logger.debug("lazysync::action_rm() recursively rm '%s'", os.path.join(relative_dirpath, filename))
+          self.action_rm(prefix, os.path.join(relative_dirpath, filename))
+      # remove dir
+      os.rmdir(original_path)
+      del self.files[relative_path]
+    elif(os.path.isfile(original_path)): # make sure file still exists and was not deleted recursively in a subdir
+      hash_input = relative_path + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+      hashed_filename = hashlib.sha1(hash_input.encode()).hexdigest()
+      backup_path = os.path.join(prefix, backup_dir, hashed_filename)
+      
+      logger.debug("lazysync::action_rm() rm file, back up in '%s' (hash_input='%s')", backup_path, hash_input)
+      shutil.move(original_path, backup_path)
+      self.backup_files[original_path].append(backupfiledata(backup_path))
+      self.save_data()
+      del self.files[relative_path]
+      
+  #
+  def action_rm_local(self, relative_path):
+    logger.debug("lazysync::action_rm_local() relative_path='%s'", relative_path)
+    self.action_rm(self.config['local'], relative_path)
+  
+  #
+  def action_rm_remote(self, relative_path):
+    logger.debug("lazysync::action_rm_remote() relative_path='%s'", relative_path)
+    self.action_rm(self.config['remote'], relative_path)
+    
+  #
+  def process_next_change(self):
+    logger.debug("lazysync::process_next_change() queue.size=%s", len(self.queue))
+    task = self.queue.popleft()
+    if(task.action in self.syncaction_functions):
+      self.syncaction_functions[task.action](task.relative_path)
+    else:
+      logger.debug("lazysync::process_next_change() no action for task '%s'", task.action)
+  
   # loop to detect sigint
   def loop(self):
     logger.debug("lazysync::loop()")
     global sigint
     while(not sigint):
-      self.process_queue()
-      time.sleep(1.5) # avoid 100% cpu load and a small delay is tolerable to quit 
-    self.notifier.stop() # turn off inotify
+      self.wait_for_backup_paths()
+      
+      start_time = timeit.default_timer()
+      
+      logger.debug("lazysync::loop() self.files.path=%s", self.files.keys())
+      if(not self.queue and self.sleep_time == 0): # check filesystem if queue is empty and waiting time is up
+        self.find_changes()
+      if(self.queue): # process any changes that are left
+        self.process_next_change()
+        
+      duration = timeit.default_timer() -  start_time
+      logger.debug("lazysync::loop() duration=%f", duration)
+      self.sleep_time += duration
 
+      if(not self.queue and self.sleep_time > 0): # sleep to avoid 100% cpu load; a small delay is tolerable to quit 
+        logger.debug("lazysync::loop() sleep with sleep_time=%f", self.sleep_time)
+        time.sleep(min_sleep) # sleep fixed time to pace polling if duration is very short
+        self.sleep_time = max(0, self.sleep_time - min_sleep)
+  
 # main    
 if __name__ == "__main__":
   logger.debug("__main__()")
   signal.signal(signal.SIGINT, sigint_handler)
-  config = merge_two_dicts(get_config(), parse_command_line()) # cmd line second to overwrite default settings in config
-  if(config['dry-run']):
-    logger.info("__main__() Dry run, NOT syncing any files!")
-
-  # default queu size is 16384 (/proc/sys/fs/inotify/max_queued_events), but it cannot be changed w/o root access;
-  # this leads to queue overflows when syncing large file of ~10GB, even when set to 100k
-  #pyinotify.max_queued_events = 100000  
+  os.stat_float_times(True) # not needed, b/c syncfiledata.equal_without_atime() only uses the int part b/c remote fs only report int values
+  
+  config = merge_two_dicts(parse_command_line(), get_default_config()) # cmd line first to overwrite default settings in config
   sync = lazysync(config)
-  sync.initialize_local()
-  sync.initialize_remote()
   sync.loop()
