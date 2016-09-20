@@ -3,16 +3,29 @@
 from __future__ import print_function
 from collections import deque, defaultdict
 import logging, argparse, os, sys, datetime, time, timeit, signal, stat, math, shutil, xdg.BaseDirectory, hashlib, errno
-import jsonpickle, enum # enum is enum34
+import jsonpickle, subprocess, enum # enum is enum34
 
 # global variables
 sigint = False # variable to check for sigint
 min_sleep = 1.9 # seconds
 app_identifier = "lazysync" # used for all paths
 backup_dir = '.%s' % (app_identifier) # to store old files for specific sync paths
+
+#
+def add_logging_level(logger, debug_level, debug_level_name):
+  #
+  def custom_debug(msg, *args, **kwargs):
+    if logger.isEnabledFor(debug_level):
+      logger._log(debug_level, msg, args, kwargs)
+    
+  logging.addLevelName(debug_level, debug_level_name.upper()) # add level name to numeric level
+  setattr(logger, debug_level_name.lower(), custom_debug) # allow calling logger.<lowercase_level_name>(msg)
+  setattr(logging, debug_level_name.upper(), debug_level) # allow setting level as logging.<uppercase_level_name>
+
 # set up logging
 logger = logging.getLogger(os.path.basename(sys.argv[0]))
-logger.setLevel(logging.DEBUG)
+add_logging_level(logger, logging.DEBUG - 1, 'TRACE')  # add level TRACE at value DEBUG - 1, i.e. just below DEBUG
+logger.setLevel(logging.INFO)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
 logger.addHandler(console_handler)
@@ -25,14 +38,14 @@ def sigint_handler(signal, frame):
   
 #
 def get_default_config():
-  logger.debug("get_default_config()")
+  logger.trace("get_default_config()")
   return {
     'ignore' : [backup_dir] # relative paths
   }
 
 # parse the folders to sync from the command line arguments
 def parse_command_line():
-  logger.debug("parse_command_line()")
+  logger.trace("parse_command_line()")
   parser = argparse.ArgumentParser(description = 'Syncs lazily a remote folder and a local folder')
   parser.add_argument('-r', '--remote', required = True)
   parser.add_argument('-l', '--local', required = True)
@@ -44,6 +57,7 @@ def parse_command_line():
 
 # merge two dicts; if key is in both and data is list or dict, merge; else overwrite default_dct with dct
 def merge_two_dicts(dct, default_dct):
+  logger.trace("merge_two_dicts()")
   final_dct = {}
   for k in set(dct).union(default_dct): # for all keys
     # if k is in both dicts, and data is list or dict, merge
@@ -60,7 +74,7 @@ def merge_two_dicts(dct, default_dct):
 
 # walk all files and folders recursively starting at root_folder; all files and folders are relative to root_folder
 def relative_walk(root_folder):
-  logger.debug("relative_walk()")
+  logger.trace("relative_walk()")
   folders = set()
   files = set()
   for dirpath, dirnames, filenames in os.walk(root_folder):
@@ -73,7 +87,7 @@ def relative_walk(root_folder):
 
 #
 def list_files(path):
-  logger.debug("list_files() path='%s'", path)
+  logger.trace("list_files() path='%s'", path)
   if(os.path.exists(path)):
     return [os.path.join(path, f) for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))] 
   else:
@@ -81,7 +95,7 @@ def list_files(path):
 
 #
 def make_sure_path_exists(path):
-  logger.debug("make_sure_path_exists()")
+  logger.trace("make_sure_path_exists()")
   try:
     os.makedirs(path)
   except OSError as e:
@@ -92,7 +106,7 @@ def make_sure_path_exists(path):
 
 #
 def read_file_contents(path):
-  logger.debug("read_file_contents()")
+  logger.trace("read_file_contents()")
   f = open(path, 'r')
   contents = f.read()
   f.close()
@@ -100,7 +114,7 @@ def read_file_contents(path):
 
 #
 def write_file_contents(path, contents):
-  logger.debug("write_file_contents()")
+  logger.trace("write_file_contents()")
   f = open(path, 'w')
   f.write(contents)
   f.close()
@@ -109,7 +123,7 @@ def write_file_contents(path, contents):
 class synctask:
   #
   def __init__(self, relative_path, action):
-    logger.debug("synctask::__init__()")
+    logger.trace("synctask::__init__()")
     self.relative_path = relative_path
     self.action = action
     
@@ -117,7 +131,7 @@ class synctask:
 class syncfiledata:
   #
   def __init__(self, path):
-    logger.debug("syncfiledata::__init__()")
+    logger.trace("syncfiledata::__init__()")
     statinfo = os.lstat(path)
     # TODO add content hash
     self.is_dir = stat.S_ISDIR(statinfo.st_mode)
@@ -129,8 +143,8 @@ class syncfiledata:
     
   # return if two syncfiledatas are equal without looking at the atime; don't look at mtime or size for directories
   def equal_without_atime(self, other):
-    logger.debug("syncfiledata::equal_without_atime() self={%s}", self)
-    logger.debug("syncfiledata::equal_without_atime() other={%s}", other)
+    logger.trace("syncfiledata::equal_without_atime() self={%s}", self)
+    logger.trace("syncfiledata::equal_without_atime() other={%s}", other)
     
     equal_is_dir = self.is_dir == other.is_dir
     equal_is_file = self.is_file == other.is_file
@@ -141,7 +155,7 @@ class syncfiledata:
     equal_size = self.size == other.size or self.is_dir
     all_equal = equal_is_dir and equal_is_file and equal_is_link and equal_mtime and equal_size
     
-    logger.debug("syncfiledata::equal_without_atime() equal=%s (is_dir=%s, is_file=%s, is_link=%s, mtime=%s, size=%s)", 
+    logger.trace("syncfiledata::equal_without_atime() equal=%s (is_dir=%s, is_file=%s, is_link=%s, mtime=%s, size=%s)", 
                  all_equal, equal_is_dir, equal_is_file, equal_is_link, equal_mtime, equal_size)
     return all_equal;
   
@@ -157,7 +171,7 @@ class syncfiledata:
 class syncfilepair:
   #
   def __init__(self, syncfiledata_remote, syncfiledata_local):
-    logger.debug("syncfilepair::__init__()")
+    logger.trace("syncfilepair::__init__()")
     self.syncfiledata_remote = syncfiledata_remote
     self.syncfiledata_local = syncfiledata_local
 
@@ -165,6 +179,7 @@ class syncfilepair:
 class backupfiledata:
   #
   def __init__(self, path):
+    logger.trace("backupfiledata::__init__()")
     self.path = path
     self.time = datetime.datetime.now()
 
@@ -172,7 +187,7 @@ class backupfiledata:
 class lazysync:
   # initialize object
   def __init__(self, config):
-    logger.debug("lazysync::__init__()")
+    logger.trace("lazysync::__init__()")
     self.config = config
     self.queue = deque() # queue of synctasks
     self.files = {} # dictionary of path -> syncfilepair to keep track of atimes and deleted files
@@ -191,19 +206,23 @@ class lazysync:
     
   # 
   def wait_for_sync_paths(self):
-    logger.debug("lazysync::wait_for_sync_paths()")
+    logger.trace("lazysync::wait_for_sync_paths()")
+    sleep = min_sleep
     while(not sigint and not (os.path.isdir(self.config['remote']) and os.path.isdir(self.config['local']))):
-      logger.debug("lazysync::wait_for_backup_paths() waiting for backup folders to be accessible")
-      time.sleep(min_sleep * 2)
+      logger.info("lazysync::wait_for_backup_paths() waiting for backup folders to be accessible")
+      time.sleep(sleep)
+      sleep += 0.4 * min_sleep
   
   #
   def wait_for_backup_paths(self):
-    logger.debug("lazysync::wait_for_backup_paths()")
+    logger.trace("lazysync::wait_for_backup_paths()")
     remote_backup_dir = os.path.join(self.config['remote'], backup_dir)
     local_backup_dir = os.path.join(self.config['local'], backup_dir)
+    sleep = min_sleep
     while(not sigint and not (os.path.isdir(remote_backup_dir) and os.path.isdir(local_backup_dir))):
-      logger.debug("lazysync::wait_for_backup_paths() waiting for backup folders to be accessible")
-      time.sleep(min_sleep * 2)
+      logger.info("lazysync::wait_for_backup_paths() waiting for backup folders to be accessible")
+      time.sleep(sleep)
+      sleep += 0.4 * min_sleep
     
   #
   def first_time_setup(self):
@@ -213,7 +232,7 @@ class lazysync:
     
   #
   def load_data(self):
-    logger.debug("lazysync::load_data()")
+    logger.trace("lazysync::load_data()")
     data_paths = list(xdg.BaseDirectory.load_data_paths(app_identifier))
     if(not data_paths):
       self.first_time_setup()
@@ -229,14 +248,14 @@ class lazysync:
       remote_backup_dir = os.path.join(self.config['remote'], backup_dir)
       local_backup_dir = os.path.join(self.config['local'], backup_dir)
       existing_backup_files = list_files(remote_backup_dir) + list_files(local_backup_dir)
-      logger.debug("lazysync::load_data() existing_backup_files=%s", existing_backup_files)
+      logger.trace("lazysync::load_data() existing_backup_files=%s", existing_backup_files)
       # make sure backup_files is consistent with existing_backup_files
       backup_files_to_be_deleted = defaultdict(list)
       for original_path in self.backup_files:
         for backup_file in self.backup_files[original_path]:
           if os.path.isfile(backup_file.path): # check that file in backup_files exists
             existing_backup_files.remove(backup_file.path) # remove it from existing_backup_files
-            logger.debug("lazysync::load_data() found backup file '%s' -> '%s' (%s)", original_path, backup_file.path, 
+            logger.info("lazysync::load_data() found backup file '%s' -> '%s' (%s)", original_path, backup_file.path, 
                          backup_file.time)
           else: # file does not exist
             backup_files_to_be_deleted[original_path].append(backup_file) # store to remove after iteration
@@ -244,18 +263,18 @@ class lazysync:
       for original_path in backup_files_to_be_deleted:
         for backup_file in backup_files_to_be_deleted[original_path]:
           self.backup_files[original_path].remove(backup_file)
-          logger.debug("lazysync::load_data() removing data for '%s' -> '%s' (%s), backup file is missing", 
+          logger.info("lazysync::load_data() removing data for '%s' -> '%s' (%s), backup file is missing", 
                        original_path, backup_file.path, backup_file.time)
       # remove existing_backup_files that have no data in backup_files
       for file in existing_backup_files:
-        logger.debug("lazysync::load_data() removing backup file '%s', backup data is missing", file)
+        logger.info("lazysync::load_data() removing backup file '%s', backup data is missing", file)
         os.remove(file)
         
     self.save_data() # save after making sure backup files are consistent
   
   #
   def save_data(self):
-    logger.debug("lazysync::save_data()")
+    logger.trace("lazysync::save_data()")
     data_path = xdg.BaseDirectory.save_data_path(app_identifier) # makes sure dir exists
     make_sure_path_exists(os.path.join(self.config['remote'], backup_dir)) # remote backup dir
     make_sure_path_exists(os.path.join(self.config['local'], backup_dir)) # local backup dir
@@ -266,7 +285,7 @@ class lazysync:
   
   #
   def filter_ignore(self, paths):
-    logger.debug("lazysync::filter_ignore()")
+    logger.trace("lazysync::filter_ignore()")
     filtered = set()
     ignored = set()
     for p in paths:
@@ -281,27 +300,27 @@ class lazysync:
     
   #
   def queue_change_for_remote(self, relative_path):
-    logger.debug("lazysync::queue_change_for_remote()")
+    logger.trace("lazysync::queue_change_for_remote() '%s'", relative_path)
     if(relative_path in self.files):
-      logger.debug("lazysync::find_changes() found locally removed relative_path: %s", relative_path)
+      logger.info("lazysync::find_changes() '%s': locally removed path; task: rm remote", relative_path)
       self.queue.append(synctask(relative_path, self.syncactions.rm_remote))
     else:
-      logger.debug("lazysync::find_changes() found new remote relative_path: %s", relative_path)
+      logger.info("lazysync::find_changes() '%s': new remote path; task: ln remote local", relative_path)
       self.queue.append(synctask(relative_path, self.syncactions.ln_remote))
   
   #
   def queue_change_for_local(self, relative_path):
-    logger.debug("lazysync::queue_change_for_local()")
+    logger.trace("lazysync::queue_change_for_local()")
     if(relative_path in self.files):
-      logger.debug("lazysync::find_changes() found remotely removed relative_path: %s", relative_path)
+      logger.info("lazysync::find_changes() '%s': remotely removed path; task: rm local", relative_path)
       self.queue.append(synctask(relative_path, self.syncactions.rm_local))
     else:
-      logger.debug("lazysync::find_changes() found new local relative_path: %s", relative_path)
+      logger.info("lazysync::find_changes() '%s': new local path; task: cp local remote", relative_path)
       self.queue.append(synctask(relative_path, self.syncactions.cp_local))
   
   # 
   def find_changes(self):
-    logger.debug("lazysync::find_changes()")
+    logger.trace("lazysync::find_changes()")
     remote_folder_set, remote_file_set = relative_walk(self.config['remote']) 
     local_folder_set, local_file_set = relative_walk(self.config['local'])
     
@@ -315,7 +334,7 @@ class lazysync:
     
     # folders_both and files_both need to be compared against self.files, and, if different, added to self.queue
     for relative_path in folders_both | files_both: # for existing folders and files ordering them is not needed
-      logger.debug("lazysync::find_changes() found relative_path in both: %s", relative_path)
+      logger.debug("lazysync::find_changes() '%s': found path in both", relative_path)
       path_remote = os.path.join(self.config['remote'], relative_path)
       path_local = os.path.join(self.config['local'], relative_path)
       new_syncfiledata_remote = syncfiledata(path_remote)
@@ -325,27 +344,28 @@ class lazysync:
         # if the file was tracked before and it has been accessed since, download it
         if(relative_path in self.files 
            and self.files[relative_path].syncfiledata_remote.atime < new_syncfiledata_remote.atime):
-          logger.debug("lazysync::find_changes() remote has been accessed, old=%f (%s), new=%f (%s), downloading.", 
-                       self.files[relative_path].syncfiledata_remote.atime, 
-                       datetime.datetime.fromtimestamp(self.files[relative_path].syncfiledata_remote.atime).strftime(
-                         '%Y-%m-%d %H:%M:%S.%f'),
-                       new_syncfiledata_remote.atime, 
-                       datetime.datetime.fromtimestamp(new_syncfiledata_remote.atime).strftime('%Y-%m-%d %H:%M:%S.%f'))
+          logger.info("lazysync::find_changes() '%s': remote has been accessed, old=%f (%s), new=%f (%s); task: cp remote local", 
+                      relative_path, self.files[relative_path].syncfiledata_remote.atime, 
+                      datetime.datetime.fromtimestamp(self.files[relative_path].syncfiledata_remote.atime).strftime(
+                        '%Y-%m-%d %H:%M:%S.%f'),
+                      new_syncfiledata_remote.atime, 
+                      datetime.datetime.fromtimestamp(new_syncfiledata_remote.atime).strftime('%Y-%m-%d %H:%M:%S.%f'))
           self.queue.append(synctask(relative_path, self.syncactions.cp_remote))
         else: # otherwise just update if it was not tracked before
-          logger.debug("lazysync::find_changes() path_local is a symlink to path_remote, no changes needed")
+          logger.debug("lazysync::find_changes() '%s': path_local is a symlink to path_remote, no changes needed", 
+                       relative_path)
           if(relative_path not in self.files):
             self.files[relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
       elif(new_syncfiledata_remote.equal_without_atime(new_syncfiledata_local)):
-        logger.debug("lazysync::find_changes() equal")
+        logger.debug("lazysync::find_changes() '%s': equal", relative_path)
         if(relative_path not in self.files):
           self.files[relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
       else:
         if(new_syncfiledata_remote.mtime > new_syncfiledata_local.mtime):
-          logger.debug("lazysync::find_changes() NOT equal; task: ln remote local")
+          logger.info("lazysync::find_changes() '%s': NOT equal; task: ln remote local", relative_path)
           self.queue.append(synctask(relative_path, self.syncactions.ln_remote))
         else:
-          logger.debug("lazysync::find_changes() NOT equal; task: cp local remote")
+          logger.info("lazysync::find_changes() '%s': NOT equal; task: cp local remote", relative_path)
           self.queue.append(synctask(relative_path, self.syncactions.cp_local))
       
     # *_only has to be added to self.queue, either to cp/ln if new, or to rm if old
@@ -360,7 +380,7 @@ class lazysync:
       
   #
   def update_file_tracking(self, relative_path):
-    logger.debug("lazysync::update_file_tracking() relative_path='%s'", relative_path)
+    logger.trace("lazysync::update_file_tracking() relative_path='%s'", relative_path)
     new_syncfiledata_remote = syncfiledata(os.path.join(self.config['remote'], relative_path))
     new_syncfiledata_local = syncfiledata(os.path.join(self.config['local'], relative_path))
     self.files[relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
@@ -374,11 +394,11 @@ class lazysync:
     if(os.path.islink(path_local)):
       pass # TODO clear potential existing link; handle local links
     elif(os.path.isdir(path_local)):
-      logger.debug("lazysync::action_cp_local() relative_path is dir, mkdir remote='%s'", path_remote)
+      logger.info("lazysync::action_cp_local() relative_path is dir, mkdir remote='%s'", path_remote)
       os.makedirs(path_remote)
       shutil.copystat(path_local, path_remote)
     else:
-      logger.debug("lazysync::action_cp_local() relative_path is file, cp local='%s' remote='%s'", path_local, 
+      logger.info("lazysync::action_cp_local() relative_path is file, cp local='%s' remote='%s'", path_local, 
                    path_remote)
       if(os.path.lexists(path_remote)):
         self.action_rm_remote(relative_path)
@@ -388,7 +408,7 @@ class lazysync:
 
   #
   def action_cp_remote(self, relative_path):
-    logger.debug("lazysync::action_cp_remote() relative_path='%s'", relative_path)
+    logger.info("lazysync::action_cp_remote() relative_path='%s'", relative_path)
     path_remote = os.path.join(self.config['remote'], relative_path)
     path_local = os.path.join(self.config['local'], relative_path)
     
@@ -406,11 +426,11 @@ class lazysync:
     if(os.path.islink(path_remote)):
       pass # TODO clear potential existing link; handle local links
     elif(os.path.isdir(path_remote)):
-      logger.debug("lazysync::action_ln_remote() relative_path is dir, mkdir local='%s'", path_local)
+      logger.info("lazysync::action_ln_remote() relative_path is dir, mkdir local='%s'", path_local)
       os.makedirs(path_local)
       shutil.copystat(path_remote, path_local)
     else:
-      logger.debug("lazysync::action_ln_remote() relative_path is file, ln -s remote='%s' local='%s'", path_remote, 
+      logger.info("lazysync::action_ln_remote() relative_path is file, ln -s remote='%s' local='%s'", path_remote, 
                    path_local)
       if(os.path.lexists(path_local)):
         self.action_rm_local(relative_path)
@@ -424,7 +444,7 @@ class lazysync:
     original_path = os.path.join(prefix, relative_path)
     
     if(os.path.islink(original_path)):
-      logger.debug("lazysync::action_rm() rm symlink")
+      logger.info("lazysync::action_rm() rm symlink")
       os.remove(original_path) # symlinks are not backed up
       del self.files[relative_path]
     elif(os.path.isdir(original_path)):
@@ -433,10 +453,10 @@ class lazysync:
       for dirpath, dirnames, filenames in os.walk(original_path):
         relative_dirpath = os.path.relpath(dirpath, prefix)
         for dirname in dirnames:
-          logger.debug("lazysync::action_rm() recursively rm '%s'", os.path.join(relative_dirpath, dirname))
+          logger.info("lazysync::action_rm() recursively rm '%s'", os.path.join(relative_dirpath, dirname))
           self.action_rm(prefix, os.path.join(relative_dirpath, dirname))
         for filename in filenames: 
-          logger.debug("lazysync::action_rm() recursively rm '%s'", os.path.join(relative_dirpath, filename))
+          logger.info("lazysync::action_rm() recursively rm '%s'", os.path.join(relative_dirpath, filename))
           self.action_rm(prefix, os.path.join(relative_dirpath, filename))
       # remove dir
       os.rmdir(original_path)
@@ -446,20 +466,21 @@ class lazysync:
       hashed_filename = hashlib.sha1(hash_input.encode()).hexdigest()
       backup_path = os.path.join(prefix, backup_dir, hashed_filename)
       
-      logger.debug("lazysync::action_rm() rm file, back up in '%s' (hash_input='%s')", backup_path, hash_input)
+      logger.info("lazysync::action_rm() rm file, back up in '%s' (hash_input='%s')", backup_path, hash_input)
       shutil.move(original_path, backup_path)
       self.backup_files[original_path].append(backupfiledata(backup_path))
       self.save_data()
-      del self.files[relative_path]
+      if relative_path in self.files: # check, b/c an old file can exist from a previous run, but no entry in self.files
+        del self.files[relative_path]
       
   #
   def action_rm_local(self, relative_path):
-    logger.debug("lazysync::action_rm_local() relative_path='%s'", relative_path)
+    logger.info("lazysync::action_rm_local() relative_path='%s'", relative_path)
     self.action_rm(self.config['local'], relative_path)
   
   #
   def action_rm_remote(self, relative_path):
-    logger.debug("lazysync::action_rm_remote() relative_path='%s'", relative_path)
+    logger.info("lazysync::action_rm_remote() relative_path='%s'", relative_path)
     self.action_rm(self.config['remote'], relative_path)
     
   #
@@ -473,14 +494,14 @@ class lazysync:
   
   # loop to detect sigint
   def loop(self):
-    logger.debug("lazysync::loop()")
+    logger.trace("lazysync::loop()")
     global sigint
     while(not sigint):
       self.wait_for_backup_paths()
       
       start_time = timeit.default_timer()
       
-      logger.debug("lazysync::loop() self.files.path=%s", self.files.keys())
+      logger.trace("lazysync::loop() self.files.path=%s", self.files.keys())
       if(not self.queue and self.sleep_time == 0): # check filesystem if queue is empty and waiting time is up
         self.find_changes()
       if(self.queue): # process any changes that are left
@@ -491,16 +512,17 @@ class lazysync:
       self.sleep_time += duration
 
       if(not self.queue and self.sleep_time > 0): # sleep to avoid 100% cpu load; a small delay is tolerable to quit 
-        logger.debug("lazysync::loop() sleep with sleep_time=%f", self.sleep_time)
+        logger.info("lazysync::loop() sleep with sleep_time=%f", self.sleep_time)
         time.sleep(min_sleep) # sleep fixed time to pace polling if duration is very short
         self.sleep_time = max(0, self.sleep_time - min_sleep)
   
 # main    
 if __name__ == "__main__":
-  logger.debug("__main__()")
+  logger.trace("__main__()")
   signal.signal(signal.SIGINT, sigint_handler)
-  os.stat_float_times(True) # not needed, b/c syncfiledata.equal_without_atime() only uses the int part b/c remote fs only report int values
+  # not needed, b/c syncfiledata.equal_without_atime() only uses the int part b/c remote fs only report int values
+  os.stat_float_times(True) 
   
-  config = merge_two_dicts(parse_command_line(), get_default_config()) # cmd line first to overwrite default settings in config
+  config = merge_two_dicts(parse_command_line(), get_default_config()) # cmd line first to overwrite default settings 
   sync = lazysync(config)
   sync.loop()
