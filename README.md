@@ -67,6 +67,9 @@ python lazysync.py -r /remote/ -l /local/
 * Box/webdav: When syncing files local to `remote`, the `remote` mtime will be what it was synced to based on the 
   `local` file until the webdav is unmounted; on unmount and remount, the `remote` mtime will be the upload time, which 
   will be newer than the `local` mtime, so lazysync will think `remote` was updated and update `local` (`ln`/`cp`).
+* Box/webdav: When syncing files while LazySync is running, davfs2 will return two different atimes on upload (either
+  when copying to `remote` folder, or even when uploading though Box' webinterface), so that LazySync will conclude that
+  the `remote` file was accessed (through the symlink) and download it to `local`.
 
 ### Data
 

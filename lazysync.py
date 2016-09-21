@@ -384,6 +384,8 @@ class lazysync:
     new_syncfiledata_remote = syncfiledata(os.path.join(self.config['remote'], relative_path))
     new_syncfiledata_local = syncfiledata(os.path.join(self.config['local'], relative_path))
     self.files[relative_path] = syncfilepair(new_syncfiledata_remote, new_syncfiledata_local)
+    logger.trace("lazysync::update_file_tracking() remote=%s", new_syncfiledata_remote)
+    logger.trace("lazysync::update_file_tracking() local=%s", new_syncfiledata_local)
       
   #
   def action_cp_local(self, relative_path):
@@ -496,6 +498,8 @@ class lazysync:
   def loop(self):
     logger.trace("lazysync::loop()")
     global sigint
+    print_update_threshold = 15 // min_sleep
+    update_count = print_update_threshold - 1
     while(not sigint):
       self.wait_for_backup_paths()
       
@@ -504,15 +508,18 @@ class lazysync:
       logger.trace("lazysync::loop() self.files.path=%s", self.files.keys())
       if(not self.queue and self.sleep_time == 0): # check filesystem if queue is empty and waiting time is up
         self.find_changes()
+        update_count += 1
       if(self.queue): # process any changes that are left
         self.process_next_change()
+        update_count = print_update_threshold
         
       duration = timeit.default_timer() -  start_time
       logger.debug("lazysync::loop() duration=%f", duration)
       self.sleep_time += duration
 
       if(not self.queue and self.sleep_time > 0): # sleep to avoid 100% cpu load; a small delay is tolerable to quit 
-        logger.info("lazysync::loop() sleep with sleep_time=%f", self.sleep_time)
+        level = logging.INFO if(duration > min_sleep or update_count % print_update_threshold == 0) else logging.DEBUG
+        logger.log(level, "lazysync::loop() sleep with sleep_time=%f", self.sleep_time)
         time.sleep(min_sleep) # sleep fixed time to pace polling if duration is very short
         self.sleep_time = max(0, self.sleep_time - min_sleep)
   
