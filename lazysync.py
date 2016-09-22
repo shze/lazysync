@@ -429,7 +429,8 @@ class lazysync:
       pass # TODO clear potential existing link; handle local links
     elif(os.path.isdir(path_remote)):
       logger.info("lazysync::action_ln_remote() relative_path is dir, mkdir local='%s'", path_local)
-      os.makedirs(path_local)
+      if(not os.path.lexists(path_local)): # only create the path is it does not exist (could be created with a subdir)
+        os.makedirs(path_local)
       shutil.copystat(path_remote, path_local)
     else:
       logger.info("lazysync::action_ln_remote() relative_path is file, ln -s remote='%s' local='%s'", path_remote, 
