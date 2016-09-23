@@ -19,6 +19,21 @@ Syncs two folders lazily.
 python lazysync.py -r /remote/ -l /local/
 ```
 
+```
+python ~/Code/lazysync/lazysync.py -h
+usage: lazysync.py [-h] -r RMT -l LCL [-L {y,n}]
+
+Syncs lazily a remote folder and a local folder
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -r RMT, --remote RMT  Path where the remote data is located
+  -l LCL, --local LCL   Path where the local data is located
+  -L {y,n}, --lazy {y,n}
+                        Sync lazily (on access) or not (always download)
+
+```
+
 ## Status
 
 * Syncing works for folders and files.
@@ -26,11 +41,11 @@ python lazysync.py -r /remote/ -l /local/
 * Sync is automatically paused if paths are not yet mounted on start, or are unmounted during its run.
 * Problems:
   * Relative symlinks `local` -> `remote` are not updated. (LazySync creates symlinks with absolute paths.)
+  * If multiple users access `remote`, anothers user's access might be mistaken as own access and cause a file download.
 * To Do:
   * Better logging levels and user adjustable logging.
   * Make sleep time user adjustable.
   * Syncing (user created) symlinks.
-  * Non-lazy syncing.
   * Dry-run mode.
   * RSync-based copy and rate-limiting speed of copying.
   * Size limit for downloaded files.

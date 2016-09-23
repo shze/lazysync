@@ -47,12 +47,15 @@ def get_default_config():
 def parse_command_line():
   logger.trace("parse_command_line()")
   parser = argparse.ArgumentParser(description = 'Syncs lazily a remote folder and a local folder')
-  parser.add_argument('-r', '--remote', required = True)
-  parser.add_argument('-l', '--local', required = True)
+  parser.add_argument('-r', '--remote', metavar = 'RMT', required = True, help = 'Path where the remote data is located')
+  parser.add_argument('-l', '--local', metavar = 'LCL', required = True, help = 'Path where the local data is located')
+  parser.add_argument('-L', '--lazy', choices = ['y', 'n'], default = 'n', 
+                      help = 'Sync lazily (on access) or not (always download)')
   args = parser.parse_args()
   return {
     'remote': os.path.abspath(args.remote), 
-    'local': os.path.abspath(args.local)
+    'local': os.path.abspath(args.local),
+    'lazy': args.lazy == 'y'
   }
 
 # merge two dicts; if key is in both and data is list or dict, merge; else overwrite default_dct with dct
@@ -187,8 +190,8 @@ class backupfiledata:
 class lazysync:
   # initialize object
   def __init__(self, config):
-    logger.trace("lazysync::__init__()")
     self.config = config
+    logger.info("lazysync::__init__() Using %slazy mode.", '' if config['lazy'] else 'non-')
     self.queue = deque() # queue of synctasks
     self.files = {} # dictionary of path -> syncfilepair to keep track of atimes and deleted files
     self.backup_files = defaultdict(list) # dictionary of original_path -> [backupfiledata] to keep deleted files
@@ -341,8 +344,13 @@ class lazysync:
       new_syncfiledata_local = syncfiledata(path_local)
       
       if(os.path.islink(path_local) and os.path.realpath(path_local) == path_remote): # always to file, never to dir
+        # if a symlink local -> remote is found in non-lazy mode, download the file
+        if(not self.config['lazy']):
+          logger.info("lazysync::find_changes() '%s': found symlink in non-lazy mode, downloading; task: cp remote local", 
+                      relative_path)
+          self.queue.append(synctask(relative_path, self.syncactions.cp_remote))
         # if the file was tracked before and it has been accessed since, download it
-        if(relative_path in self.files 
+        elif(relative_path in self.files 
            and self.files[relative_path].syncfiledata_remote.atime < new_syncfiledata_remote.atime):
           logger.info("lazysync::find_changes() '%s': remote has been accessed, old=%f (%s), new=%f (%s); task: cp remote local", 
                       relative_path, self.files[relative_path].syncfiledata_remote.atime, 
@@ -450,7 +458,7 @@ class lazysync:
     path_remote = os.path.join(self.config['remote'], relative_path)
     path_local = os.path.join(self.config['local'], relative_path)
     
-    if(os.path.islink(path_remote) or os.path.isdir(path_remote)):
+    if(os.path.islink(path_remote) or os.path.isdir(path_remote)) or not self.config['lazy']:
       self.action_cp_remote(relative_path)
     else:
       logger.info("lazysync::action_ln_remote() relative_path is file, ln -s remote='%s' local='%s'", path_remote, 
