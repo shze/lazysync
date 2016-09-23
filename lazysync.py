@@ -141,7 +141,7 @@ class syncfiledata:
     self.mtime = statinfo.st_mtime
     self.size = statinfo.st_size
     
-  # return if two syncfiledatas are equal without looking at the atime; don't look at mtime or size for directories
+  # return if two syncfiledatas are equal without looking at the atime; don't look at mtime or size for dirs and links
   def equal_without_atime(self, other):
     logger.trace("syncfiledata::equal_without_atime() self={%s}", self)
     logger.trace("syncfiledata::equal_without_atime() other={%s}", other)
@@ -151,8 +151,8 @@ class syncfiledata:
     equal_is_link = self.is_link == other.is_link
     # dir mtime changes when contents change, i.e. on every file sync -> avoid having to sync dir mtime everytime by not 
     # comparing mtime for dirs
-    equal_mtime = math.floor(self.mtime) == math.floor(other.mtime) or self.is_dir
-    equal_size = self.size == other.size or self.is_dir
+    equal_mtime = math.floor(self.mtime) == math.floor(other.mtime) or self.is_dir or self.is_link
+    equal_size = self.size == other.size or self.is_dir or self.is_link
     all_equal = equal_is_dir and equal_is_file and equal_is_link and equal_mtime and equal_size
     
     logger.trace("syncfiledata::equal_without_atime() equal=%s (is_dir=%s, is_file=%s, is_link=%s, mtime=%s, size=%s)", 
