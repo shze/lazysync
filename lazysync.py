@@ -394,7 +394,14 @@ class lazysync:
     path_local = os.path.join(self.config['local'], relative_path)
     
     if(os.path.islink(path_local)):
-      pass # TODO clear potential existing link; handle local links
+      link_target = os.path.realpath(path_local)
+      if(os.path.realpath(path_local).startswith(self.config['local'])):
+        link_target = os.path.join(self.config['remote'], os.path.relpath(link_target, self.config['local']))
+      logger.info("lazysync::action_cp_local() relative_path is symlink, ln -s target='%s' remote='%s'", link_target, 
+                  path_remote)
+      if(os.path.lexists(path_remote)):
+        self.action_rm_remote(relative_path)
+      os.symlink(link_target, path_remote)
     elif(os.path.isdir(path_local)):
       logger.info("lazysync::action_cp_local() relative_path is dir, mkdir remote='%s'", path_remote)
       os.makedirs(path_remote)
@@ -410,14 +417,32 @@ class lazysync:
 
   #
   def action_cp_remote(self, relative_path):
-    logger.info("lazysync::action_cp_remote() relative_path='%s'", relative_path)
+    logger.debug("lazysync::action_cp_remote() relative_path='%s'", relative_path)
     path_remote = os.path.join(self.config['remote'], relative_path)
     path_local = os.path.join(self.config['local'], relative_path)
-    
-    if(os.path.isfile(path_remote)): # only handle files, everything else should be handled by action_ln_remote()
+
+    if(os.path.islink(path_remote)):
+      link_target = os.path.realpath(path_remote)
+      if(os.path.realpath(path_remote).startswith(self.config['remote'])):
+        link_target = os.path.join(self.config['local'], os.path.relpath(link_target, self.config['remote']))
+      logger.info("lazysync::action_cp_remote() relative_path is symlink, ln -s target='%s' local='%s'", link_target, 
+                  path_local)
+      if(os.path.lexists(path_local)):
+        self.action_rm_local(relative_path)
+      os.symlink(link_target, path_local)
+    elif(os.path.isdir(path_remote)):
+      logger.info("lazysync::action_cp_remote() relative_path is dir, mkdir local='%s'", path_local)
+      if(not os.path.lexists(path_local)): # only create the path is it does not exist (could be created with a subdir)
+        os.makedirs(path_local)
+      shutil.copystat(path_remote, path_local)
+    else:
+      logger.info("lazysync::action_cp_remote() relative_path is file, cp remote='%s' local='%s'", path_remote, 
+                  path_local)
       if(os.path.islink(path_local)):
-        self.action_rm(self.config['local'], relative_path)
+        self.action_rm_local(relative_path)
       shutil.copy2(path_remote, path_local)
+      
+    self.update_file_tracking(relative_path)
     
   #
   def action_ln_remote(self, relative_path):
@@ -425,21 +450,15 @@ class lazysync:
     path_remote = os.path.join(self.config['remote'], relative_path)
     path_local = os.path.join(self.config['local'], relative_path)
     
-    if(os.path.islink(path_remote)):
-      pass # TODO clear potential existing link; handle local links
-    elif(os.path.isdir(path_remote)):
-      logger.info("lazysync::action_ln_remote() relative_path is dir, mkdir local='%s'", path_local)
-      if(not os.path.lexists(path_local)): # only create the path is it does not exist (could be created with a subdir)
-        os.makedirs(path_local)
-      shutil.copystat(path_remote, path_local)
+    if(os.path.islink(path_remote) or os.path.isdir(path_remote)):
+      self.action_cp_remote(relative_path)
     else:
       logger.info("lazysync::action_ln_remote() relative_path is file, ln -s remote='%s' local='%s'", path_remote, 
                    path_local)
       if(os.path.lexists(path_local)):
         self.action_rm_local(relative_path)
       os.symlink(path_remote, path_local)
-      
-    self.update_file_tracking(relative_path)
+      self.update_file_tracking(relative_path)
       
   #
   def action_rm(self, prefix, relative_path):
@@ -449,7 +468,8 @@ class lazysync:
     if(os.path.islink(original_path)):
       logger.info("lazysync::action_rm() rm symlink")
       os.remove(original_path) # symlinks are not backed up
-      del self.files[relative_path]
+      if relative_path in self.files: # check, b/c an old file can exist from a previous run, but no entry in self.files
+        del self.files[relative_path]
     elif(os.path.isdir(original_path)):
       logger.debug("lazysync::action_rm() rm dir")
       # remove dir contents recursively
@@ -463,7 +483,8 @@ class lazysync:
           self.action_rm(prefix, os.path.join(relative_dirpath, filename))
       # remove dir
       os.rmdir(original_path)
-      del self.files[relative_path]
+      if relative_path in self.files: # check, b/c an old file can exist from a previous run, but no entry in self.files
+        del self.files[relative_path]
     elif(os.path.isfile(original_path)): # make sure file still exists and was not deleted recursively in a subdir
       hash_input = relative_path + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
       hashed_filename = hashlib.sha1(hash_input.encode()).hexdigest()
