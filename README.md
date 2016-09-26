@@ -41,7 +41,8 @@ optional arguments:
 * Sync is automatically paused if paths are not yet mounted on start, or are unmounted during its run.
 * Problems:
   * Relative symlinks `local` -> `remote` are not updated. (LazySync creates symlinks with absolute paths.)
-  * If multiple users access `remote`, anothers user's access might be mistaken as own access and cause a file download.
+  * If `remote` is accessed by anybody or anything else, it will mistakenly be counted as own access and cause a file 
+    download.
 * To Do:
   * Better logging levels and user adjustable logging.
   * Make sleep time user adjustable.
