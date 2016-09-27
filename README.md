@@ -112,7 +112,7 @@ optional arguments:
   a long time.
 * A minimal example to use the ofnotify.notifier follows:
 
-```
+```python
 #!/usr/bin/env python
 
 from __future__ import print_function
