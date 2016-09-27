@@ -22,9 +22,10 @@ class event_processor:
 #
 class notifier:
   #
-  def __init__(self, event_processor, watch_paths):
+  def __init__(self, event_processor, watch_paths, sleep_time = 0.7):
     self.event_processor = event_processor
     self.watch_paths = watch_paths
+    self.sleep_time = sleep_time
     self.queue = deque()
     self.tracked_files = set()
 
@@ -68,7 +69,7 @@ class notifier:
         self._find_changes()
         while self.queue:
           self.event_processor.process_event(self.queue.popleft())
-        time.sleep(0.5)
+        time.sleep(self.sleep_time)
       except KeyboardInterrupt:
         break
   

@@ -97,3 +97,32 @@ optional arguments:
   `<sync_hash>` is a hash calculated from the two sync paths.
 * Deleted files are not directly deleted, but kept in `{remote,local}/.lazysync/<backup_hash>`. `<backup_hash>` is a 
   hash based on the original filename and the deletion date and time.
+
+### Open file notify (ofnotify)
+
+* Scan the list of open files for all processes in regular intervals to detect newly opened and closed files on the 
+  local system only without any influences by other accesses to the remote files.
+* This is achieved by scanning /proc/<pid>/fd/<fd>. By comparing with the previous scan, files that have been opened or
+  closed are detected and events are created accordingly.
+* The time interval should correlate with the file size for a given filesystem and network connection. If the time to 
+  read a file is longer than the time interval, this file should be detected and open and close events created (a file 
+  that is read faster, will only be detected if the scan for open files happens between opening and closing of this 
+  file.)
+* On the first scan, all already open files will be treated like they were just opened, even if they have been open for
+  a long time.
+* A minimal example to use the ofnotify.notifier follows:
+
+```
+#!/usr/bin/env python
+
+from __future__ import print_function
+import ofnotify
+
+class my_event_processor(ofnotify.event_processor):
+  def process_event(self, event):
+    print("process_event: path='%s' type=%s" % (event.path, event.type))
+
+if __name__ == "__main__":
+  n = ofnotify.notifier(my_event_processor(), ['/path/1/', '/path/2/'])
+  n.loop()
+```
