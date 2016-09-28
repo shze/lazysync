@@ -110,7 +110,8 @@ optional arguments:
   file.)
 * On the first scan, all already open files will be treated like they were just opened, even if they have been open for
   a long time.
-* A minimal example to use the ofnotify.notifier follows:
+
+#### Example for ofnotify.notifier
 
 ```python
 #!/usr/bin/env python
@@ -125,4 +126,32 @@ class my_event_processor(ofnotify.event_processor):
 if __name__ == "__main__":
   n = ofnotify.notifier(my_event_processor(), ['/path/1/', '/path/2/'])
   n.loop()
+```
+
+#### Example for ofnotify.threaded_notifier
+
+```python
+#!/usr/bin/env python
+
+from __future__ import print_function
+import ofnotify, time
+
+class my_event_processor(ofnotify.event_processor):
+  def process_event(self, event):
+    print("process_event: path='%s' type=%s" % (event.path, event.type))
+
+# main    
+if __name__ == "__main__":
+  n = ofnotify.threaded_notifier(my_event_processor(), ['/path/1/', '/path/2/'])
+  n.start()
+  
+  while 1:
+    try:
+      time.sleep(2)
+    except KeyboardInterrupt:
+      n.stop()
+      break
+    except:
+      n.stop()
+      raise
 ```
