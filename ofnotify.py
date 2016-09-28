@@ -17,7 +17,7 @@ class event:
 #
 class event_processor:
   #
-  def process_event(self, event):
+  def process_ofnotify_event(self, event):
     pass
 
 #
@@ -64,7 +64,7 @@ class notifier:
       try:
         self._find_changes()
         while self.queue:
-          self.event_processor.process_event(self.queue.popleft())
+          self.event_processor.process_ofnotify_event(self.queue.popleft())
         time.sleep(self.sleep_time)
       except KeyboardInterrupt:
         break
@@ -82,7 +82,7 @@ class threaded_notifier(threading.Thread, notifier):
     while not self._stop_event.is_set():
       self._find_changes()
       while self.queue:
-        self.event_processor.process_event(self.queue.popleft())
+        self.event_processor.process_ofnotify_event(self.queue.popleft())
       time.sleep(self.sleep_time)
   
   #

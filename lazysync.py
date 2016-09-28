@@ -3,7 +3,7 @@
 from __future__ import print_function
 from collections import deque, defaultdict
 import logging, argparse, os, sys, datetime, time, timeit, signal, stat, math, shutil, xdg.BaseDirectory, hashlib, errno
-import jsonpickle, subprocess, enum # enum is enum34
+import jsonpickle, subprocess, ofnotify, enum # enum is enum34
 
 # global variables
 sigint = False # variable to check for sigint
@@ -187,7 +187,7 @@ class backupfiledata:
     self.time = datetime.datetime.now()
 
 # lazily syncs two folders with the given config parameters
-class lazysync:
+class lazysync(ofnotify.event_processor):
   # initialize object
   def __init__(self, config):
     self.config = config
@@ -206,6 +206,10 @@ class lazysync:
     path_pair = self.config['remote'] + '?' + self.config['local']
     self.hashed_path_pair = hashlib.sha1(path_pair.encode()).hexdigest()
     self.load_data()
+    
+    self.notifier = ofnotify.threaded_notifier(self, [self.config['remote']])
+    if self.config['lazy']:
+      self.notifier.start()
     
   # 
   def wait_for_sync_paths(self):
@@ -300,7 +304,19 @@ class lazysync:
     
     logger.debug("lazysync::filter_ignore() ignored=%s", ignored)
     return filtered
-    
+
+  #    
+  def process_ofnotify_event(self, event):
+    relative_path = os.path.relpath(event.path, self.config['remote'])
+    path_local = os.path.join(self.config['local'], relative_path)
+    path_remote = event.path
+    logger.trace("lazysync::process_event() '%s' event=%s", relative_path, event.type)
+    if(event.type == ofnotify.event_types.close and os.path.islink(path_local) 
+       and os.path.realpath(path_local) == path_remote):
+      logger.info("lazysync::process_event() '%s': symlinked remote has been accessed, downloading; task: cp remote local", 
+                  relative_path)
+      self.queue.append(synctask(relative_path, self.syncactions.cp_remote))
+
   #
   def queue_change_for_remote(self, relative_path):
     logger.trace("lazysync::queue_change_for_remote() '%s'", relative_path)
@@ -348,16 +364,6 @@ class lazysync:
         if(not self.config['lazy']):
           logger.info("lazysync::find_changes() '%s': found symlink in non-lazy mode, downloading; task: cp remote local", 
                       relative_path)
-          self.queue.append(synctask(relative_path, self.syncactions.cp_remote))
-        # if the file was tracked before and it has been accessed since, download it
-        elif(relative_path in self.files 
-           and self.files[relative_path].syncfiledata_remote.atime < new_syncfiledata_remote.atime):
-          logger.info("lazysync::find_changes() '%s': remote has been accessed, old=%f (%s), new=%f (%s); task: cp remote local", 
-                      relative_path, self.files[relative_path].syncfiledata_remote.atime, 
-                      datetime.datetime.fromtimestamp(self.files[relative_path].syncfiledata_remote.atime).strftime(
-                        '%Y-%m-%d %H:%M:%S.%f'),
-                      new_syncfiledata_remote.atime, 
-                      datetime.datetime.fromtimestamp(new_syncfiledata_remote.atime).strftime('%Y-%m-%d %H:%M:%S.%f'))
           self.queue.append(synctask(relative_path, self.syncactions.cp_remote))
         else: # otherwise just update if it was not tracked before
           logger.debug("lazysync::find_changes() '%s': path_local is a symlink to path_remote, no changes needed", 
@@ -552,6 +558,9 @@ class lazysync:
         logger.log(level, "lazysync::loop() sleep with sleep_time=%f", self.sleep_time)
         time.sleep(min_sleep) # sleep fixed time to pace polling if duration is very short
         self.sleep_time = max(0, self.sleep_time - min_sleep)
+        
+    if self.config['lazy']:
+      self.notifier.stop()
   
 # main    
 if __name__ == "__main__":
