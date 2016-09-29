@@ -102,8 +102,9 @@ optional arguments:
 
 * Scan the list of open files for all processes in regular intervals to detect newly opened and closed files on the 
   local system only without any influences by other accesses to the remote files.
-* This is achieved by scanning /proc/<pid>/fd/<fd>. By comparing with the previous scan, files that have been opened or
-  closed are detected and events are created accordingly.
+* This is achieved by scanning [/proc/<pid>/fd/<fd>](https://www.kernel.org/doc/Documentation/filesystems/proc.txt) by 
+  using [psutil](https://pypi.python.org/pypi/psutil). By comparing with the previous scan, files that have been opened 
+  or closed are detected and events are created accordingly.
 * The time interval should correlate with the file size for a given filesystem and network connection. If the time to 
   read a file is longer than the time interval, this file should be detected and open and close events created (a file 
   that is read faster, will only be detected if the scan for open files happens between opening and closing of this 

@@ -452,9 +452,9 @@ class lazysync(ofnotify.event_processor):
     else:
       logger.info("lazysync::action_cp_remote() relative_path is file, cp remote='%s' local='%s'", path_remote, 
                   path_local)
-      if(os.path.islink(path_local)):
+      if(os.path.lexists(path_local)):
         self.action_rm_local(relative_path)
-      shutil.copy2(path_remote, path_local)
+      shutil.copy2(path_remote, path_local) 
       
     self.update_file_tracking(relative_path)
     
