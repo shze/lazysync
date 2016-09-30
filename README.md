@@ -10,7 +10,6 @@ Syncs two folders lazily.
 ## Requirements
 
 * enum34
-* xdg
 * jsonpickle
 
 ## How to run
@@ -27,8 +26,8 @@ Syncs lazily a remote folder and a local folder
 
 optional arguments:
   -h, --help            show this help message and exit
-  -r RMT, --remote RMT  Path where the remote data is located
-  -l LCL, --local LCL   Path where the local data is located
+  -r RM, --remote RM    Path where the remote data is located
+  -l LC, --local LC     Path where the local data is located
   -L {y,n}, --lazy {y,n}
                         Sync lazily (on access) or not (always download)
 
@@ -91,12 +90,9 @@ optional arguments:
 
 ### Data
 
-* User data is stored in `$XDG_DATA_HOME/lazysync/<sync_hash>` based on the 
-  [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html) and
-  using [python xdg.BaseDirectory](http://pyxdg.readthedocs.io/en/latest/_modules/xdg/BaseDirectory.html).
-  `<sync_hash>` is a hash calculated from the two sync paths.
 * Deleted files are not directly deleted, but kept in `{remote,local}/.lazysync/<backup_hash>`. `<backup_hash>` is a 
-  hash based on the original filename and the deletion date and time.
+  hash based on the original filename and the deletion date and time. Information how each <backup_hash> relates back to
+  the original filename is stored in `{remote,local}/.lazysync/data`
 
 ### Open file notify (ofnotify)
 

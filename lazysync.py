@@ -2,14 +2,15 @@
 
 from __future__ import print_function
 from collections import deque, defaultdict
-import logging, argparse, os, sys, datetime, time, timeit, signal, stat, math, shutil, xdg.BaseDirectory, hashlib, errno
+import logging, argparse, os, sys, datetime, time, timeit, signal, stat, math, shutil, hashlib, errno
 import jsonpickle, subprocess, ofnotify, enum # enum is enum34
 
 # global variables
 sigint = False # variable to check for sigint
 min_sleep = 1.9 # seconds
 app_identifier = "lazysync" # used for all paths
-backup_dir = '.%s' % (app_identifier) # to store old files for specific sync paths
+relative_backup_dir = '.%s' % (app_identifier) # to store old files for specific sync paths
+data_file = 'data' # to store the information about the different backup files
 
 #
 def add_logging_level(logger, debug_level, debug_level_name):
@@ -40,15 +41,15 @@ def sigint_handler(signal, frame):
 def get_default_config():
   logger.trace("get_default_config()")
   return {
-    'ignore' : [backup_dir] # relative paths
+    'ignore' : [relative_backup_dir] # relative paths
   }
 
 # parse the folders to sync from the command line arguments
 def parse_command_line():
   logger.trace("parse_command_line()")
   parser = argparse.ArgumentParser(description = 'Syncs lazily a remote folder and a local folder')
-  parser.add_argument('-r', '--remote', metavar = 'RMT', required = True, help = 'Path where the remote data is located')
-  parser.add_argument('-l', '--local', metavar = 'LCL', required = True, help = 'Path where the local data is located')
+  parser.add_argument('-r', '--remote', metavar = 'RM', required = True, help = 'Path where the remote data is located')
+  parser.add_argument('-l', '--local', metavar = 'LC', required = True, help = 'Path where the local data is located')
   parser.add_argument('-L', '--lazy', choices = ['y', 'n'], default = 'n', 
                       help = 'Sync lazily (on access) or not (always download)')
   args = parser.parse_args()
@@ -194,7 +195,8 @@ class lazysync(ofnotify.event_processor):
     logger.info("lazysync::__init__() Using %slazy mode.", '' if config['lazy'] else 'non-')
     self.queue = deque() # queue of synctasks
     self.files = {} # dictionary of path -> syncfilepair to keep track of atimes and deleted files
-    self.backup_files = defaultdict(list) # dictionary of original_path -> [backupfiledata] to keep deleted files
+    self.remote_backup_files = defaultdict(list) # dict original_path -> [backupfiledata] to keep deleted files
+    self.local_backup_files = defaultdict(list) # dict original_path -> [backupfiledata] to keep deleted files
     self.sleep_time = 0
     self.syncactions = enum.Enum('syncactions', 'cp_local cp_remote ln_remote rm_local rm_remote')
     self.syncaction_functions = {self.syncactions.cp_local: self.action_cp_local,
@@ -203,92 +205,106 @@ class lazysync(ofnotify.event_processor):
                                  self.syncactions.rm_local: self.action_rm_local,
                                  self.syncactions.rm_remote: self.action_rm_remote}
 
-    path_pair = self.config['remote'] + '?' + self.config['local']
-    self.hashed_path_pair = hashlib.sha1(path_pair.encode()).hexdigest()
     self.load_data()
     
     self.notifier = ofnotify.threaded_notifier(self, [self.config['remote']])
     if self.config['lazy']:
       self.notifier.start()
-    
-  # 
-  def wait_for_sync_paths(self):
-    logger.trace("lazysync::wait_for_sync_paths()")
-    sleep = min_sleep
-    while(not sigint and not (os.path.isdir(self.config['remote']) and os.path.isdir(self.config['local']))):
-      logger.info("lazysync::wait_for_backup_paths() waiting for backup folders to be accessible")
-      time.sleep(sleep)
-      sleep += 0.4 * min_sleep
-  
+      
   #
-  def wait_for_backup_paths(self):
-    logger.trace("lazysync::wait_for_backup_paths()")
-    remote_backup_dir = os.path.join(self.config['remote'], backup_dir)
-    local_backup_dir = os.path.join(self.config['local'], backup_dir)
+  def wait_for_paths_available(self, paths):
+    logger.trace("lazysync::wait_for_paths_available() paths=%s", paths) # TODO make sure output is correctly formatted
     sleep = min_sleep
-    while(not sigint and not (os.path.isdir(remote_backup_dir) and os.path.isdir(local_backup_dir))):
-      logger.info("lazysync::wait_for_backup_paths() waiting for backup folders to be accessible")
+    while not sigint:
+      all_path_available = True
+      for path in paths:
+        if not os.path.isdir(path):
+          all_path_available = False
+        
+      if all_path_available:
+        return 
+
+      logger.info("lazysync::wait_for_paths_available() waiting for paths=%s to be accessible", paths)
       time.sleep(sleep)
       sleep += 0.4 * min_sleep
     
   #
   def first_time_setup(self):
     logger.debug("lazysync::first_time_setup()")
-    self.wait_for_sync_paths()
+    self.wait_for_paths_available([self.config['remote'], self.config['local']])
     self.save_data()
+    
+  #
+  def load_path_data(self, prefix):
+    logger.debug("lazysync::load_path_data() prefix='%s'", prefix)
+    backup_dir = os.path.join(prefix, relative_backup_dir)
+    backup_data_file = os.path.join(backup_dir, data_file)
+    self.wait_for_paths_available([backup_dir]) # make sure backup path is available
+    if sigint: # exit here if ctrl-c was pressed while we were waiting and not try to read the files below
+      sys.exit(0)
+    if not os.path.isfile(backup_data_file):
+      return 
+
+    logger.debug("lazysync::load_path_data() reading config from '%s'", backup_data_file)
+    expected_backup_files = jsonpickle.decode(read_file_contents(backup_data_file))[0]
+    existing_backup_files = list_files(backup_dir)
+    logger.trace("lazysync::load_path_data() expected_backup_files=%s", expected_backup_files)
+    logger.trace("lazysync::load_path_data() existing_backup_files=%s", existing_backup_files)
+    # make sure expected_backup_files is consistent with existing_backup_files: figure out which expected_backup_files 
+    # are existing (remove them from existing_backup_files) and which are not (add them to backup_files_to_be_deleted)
+    backup_files_to_be_deleted = defaultdict(list)
+    for original_path in expected_backup_files:
+      for backup_file_data_list in expected_backup_files[original_path]:
+        for backup_file_data in backup_file_data_list:
+          if os.path.isfile(backup_file_data.path): # check that backup file exists
+            existing_backup_files.remove(backup_file_data.path) # remove it from existing_backup_files
+            logger.info("lazysync::load_path_data() found backup file '%s' -> '%s' (%s)", original_path, 
+                        backup_file_data.path, backup_file_data.time)
+          else: # file does not exist
+            backup_files_to_be_deleted[original_path].append(backup_file_data) # store to remove after iteration
+    # remove expected_backup_files that have missing files      
+    for original_path in backup_files_to_be_deleted:
+      for backup_file_data_list in backup_files_to_be_deleted[original_path]:
+        for backup_file_data in backup_file_data_list:
+          expected_backup_files[original_path].remove(backup_file_data)
+          logger.info("lazysync::load_path_data() removing data for '%s' -> '%s' (%s), backup file is missing", 
+                      original_path, backup_file_data.path, backup_file_data.time)
+    # remove existing_backup_files that have no data in backup_files
+    for file in existing_backup_files:
+      if not file == backup_data_file: # do not delete the data file
+        logger.info("lazysync::load_path_data() removing backup file '%s', backup data is missing", file)
+        os.remove(file)
+      
+    return expected_backup_files
     
   #
   def load_data(self):
     logger.trace("lazysync::load_data()")
-    data_paths = list(xdg.BaseDirectory.load_data_paths(app_identifier))
-    if(not data_paths):
+    remote_backup_dir = os.path.join(self.config['remote'], relative_backup_dir)
+    local_backup_dir = os.path.join(self.config['local'], relative_backup_dir)
+    if not os.path.isdir(local_backup_dir): # assume the local backup dir is always available
       self.first_time_setup()
       return 
-      
-    config_path = os.path.join(data_paths[0], self.hashed_path_pair)
-    if(os.path.isfile(config_path)): # file exists, i.e. sync was setup before
-      logger.debug("lazysync::load_data() reading config from '%s'", config_path)
-      self.backup_files = jsonpickle.decode(read_file_contents(config_path))[0]
-      
-      # get existing_backup_files
-      self.wait_for_backup_paths() # make sure backup paths are available
-      remote_backup_dir = os.path.join(self.config['remote'], backup_dir)
-      local_backup_dir = os.path.join(self.config['local'], backup_dir)
-      existing_backup_files = list_files(remote_backup_dir) + list_files(local_backup_dir)
-      logger.trace("lazysync::load_data() existing_backup_files=%s", existing_backup_files)
-      # make sure backup_files is consistent with existing_backup_files
-      backup_files_to_be_deleted = defaultdict(list)
-      for original_path in self.backup_files:
-        for backup_file in self.backup_files[original_path]:
-          if os.path.isfile(backup_file.path): # check that file in backup_files exists
-            existing_backup_files.remove(backup_file.path) # remove it from existing_backup_files
-            logger.info("lazysync::load_data() found backup file '%s' -> '%s' (%s)", original_path, backup_file.path, 
-                         backup_file.time)
-          else: # file does not exist
-            backup_files_to_be_deleted[original_path].append(backup_file) # store to remove after iteration
-      # remove backup_files that have missing files      
-      for original_path in backup_files_to_be_deleted:
-        for backup_file in backup_files_to_be_deleted[original_path]:
-          self.backup_files[original_path].remove(backup_file)
-          logger.info("lazysync::load_data() removing data for '%s' -> '%s' (%s), backup file is missing", 
-                       original_path, backup_file.path, backup_file.time)
-      # remove existing_backup_files that have no data in backup_files
-      for file in existing_backup_files:
-        logger.info("lazysync::load_data() removing backup file '%s', backup data is missing", file)
-        os.remove(file)
-        
+    
+    self.remote_backup_files = self.load_path_data(self.config['remote'])
+    self.local_backup_files = self.load_path_data(self.config['local'])
     self.save_data() # save after making sure backup files are consistent
+    
+  #
+  def save_path_data(self, prefix, backup_files_dict):
+    logger.trace("lazysync::save_path_data()")
+    backup_dir = os.path.join(prefix, relative_backup_dir)
+    backup_data_file = os.path.join(backup_dir, data_file)
+    make_sure_path_exists(backup_dir)
+    logger.debug("lazysync::save_path_data() writing data to '%s' data=%s", backup_data_file, backup_files_dict)
+    write_file_contents(backup_data_file, jsonpickle.encode([backup_files_dict]))
   
   #
   def save_data(self):
-    logger.trace("lazysync::save_data()")
-    data_path = xdg.BaseDirectory.save_data_path(app_identifier) # makes sure dir exists
-    make_sure_path_exists(os.path.join(self.config['remote'], backup_dir)) # remote backup dir
-    make_sure_path_exists(os.path.join(self.config['local'], backup_dir)) # local backup dir
-
-    config_path = os.path.join(data_path, self.hashed_path_pair)
-    logger.debug("lazysync::save_data() writing config to '%s'", config_path)
-    write_file_contents(config_path, jsonpickle.encode([self.backup_files]))
+    logger.trace("lazysync::save_data() self.remote_backup_files=%s self.local_backup_files=%s", 
+                 self.remote_backup_files, self.local_backup_files)
+    self.save_path_data(self.config['remote'], self.remote_backup_files)
+    self.save_path_data(self.config['local'], self.local_backup_files)
   
   #
   def filter_ignore(self, paths):
@@ -478,6 +494,7 @@ class lazysync(ofnotify.event_processor):
   def action_rm(self, prefix, relative_path):
     logger.debug("lazysync::action_rm() prefix='%s' relative_path='%s'", prefix, relative_path)
     original_path = os.path.join(prefix, relative_path)
+    new_backup_files = defaultdict(list)
     
     if(os.path.islink(original_path)):
       logger.info("lazysync::action_rm() rm symlink")
@@ -502,24 +519,33 @@ class lazysync(ofnotify.event_processor):
     elif(os.path.isfile(original_path)): # make sure file still exists and was not deleted recursively in a subdir
       hash_input = relative_path + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
       hashed_filename = hashlib.sha1(hash_input.encode()).hexdigest()
-      backup_path = os.path.join(prefix, backup_dir, hashed_filename)
+      backup_path = os.path.join(prefix, relative_backup_dir, hashed_filename)
       
       logger.info("lazysync::action_rm() rm file, back up in '%s' (hash_input='%s')", backup_path, hash_input)
       shutil.move(original_path, backup_path)
-      self.backup_files[original_path].append(backupfiledata(backup_path))
-      self.save_data()
+      new_backup_files[original_path].append(backupfiledata(backup_path))
       if relative_path in self.files: # check, b/c an old file can exist from a previous run, but no entry in self.files
         del self.files[relative_path]
+    
+    return new_backup_files
       
   #
   def action_rm_local(self, relative_path):
     logger.info("lazysync::action_rm_local() relative_path='%s'", relative_path)
-    self.action_rm(self.config['local'], relative_path)
+    new_backup_files = self.action_rm(self.config['local'], relative_path)
+    for k in new_backup_files:
+      self.local_backup_files[k].append(new_backup_files[k])
+    if len(new_backup_files) > 0:
+      self.save_data()
   
   #
   def action_rm_remote(self, relative_path):
     logger.info("lazysync::action_rm_remote() relative_path='%s'", relative_path)
-    self.action_rm(self.config['remote'], relative_path)
+    new_backup_files = self.action_rm(self.config['remote'], relative_path)
+    for k in new_backup_files:
+      self.remote_backup_files[k].append(new_backup_files[k])
+    if len(new_backup_files) > 0:
+      self.save_data()
     
   #
   def process_next_change(self):
@@ -536,8 +562,10 @@ class lazysync(ofnotify.event_processor):
     global sigint
     print_update_threshold = 15 // min_sleep
     update_count = print_update_threshold - 1
+    remote_backup_dir = os.path.join(self.config['remote'], relative_backup_dir)
+    local_backup_dir = os.path.join(self.config['local'], relative_backup_dir)
     while(not sigint):
-      self.wait_for_backup_paths()
+      self.wait_for_paths_available([remote_backup_dir, local_backup_dir])
       
       start_time = timeit.default_timer()
       
