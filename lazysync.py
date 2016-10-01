@@ -419,8 +419,11 @@ class lazysync(ofnotify.event_processor):
     for backup_file_data in backup_files[original_path]:
       if last_backup_file_data == None or backup_file_data.time > last_backup_file_data.time:
         last_backup_file_data = backup_file_data
-    logger.debug("lazysync::get_last_backup_file_data() '%s' -> '%s' (%s)", original_path, last_backup_file_data.path, 
-                 last_backup_file_data.time)
+    if last_backup_file_data == None:
+      logger.debug("lazysync::get_last_backup_file_data() no backup file found")
+    else:
+      logger.debug("lazysync::get_last_backup_file_data() '%s' -> '%s' (%s)", original_path, last_backup_file_data.path, 
+                  last_backup_file_data.time)
     return last_backup_file_data
     
   #
@@ -435,71 +438,50 @@ class lazysync(ofnotify.event_processor):
     self.save_data() # save data
 
   #
-  def action_cp_local(self, relative_path):
-    logger.debug("lazysync::action_cp_local() relative_path='%s'", relative_path)
-    path_remote = os.path.join(self.config['remote'], relative_path)
-    path_local = os.path.join(self.config['local'], relative_path)
-    
-    if(os.path.islink(path_local)):
-      link_target = os.path.realpath(path_local)
-      if(os.path.realpath(path_local).startswith(self.config['local'])):
-        link_target = os.path.join(self.config['remote'], os.path.relpath(link_target, self.config['local']))
-      logger.info("lazysync::action_cp_local() relative_path is symlink, ln -s target='%s' remote='%s'", link_target, 
-                  path_remote)
-      if(os.path.lexists(path_remote)):
-        self.action_rm_remote(relative_path)
-      os.symlink(link_target, path_remote)
-    elif(os.path.isdir(path_local)):
-      logger.info("lazysync::action_cp_local() relative_path is dir, mkdir remote='%s'", path_remote)
-      os.makedirs(path_remote)
-      shutil.copystat(path_local, path_remote)
+  def action_cp(self, from_prefix, to_prefix, relative_path):
+    logger.debug("lazysync::action_cp() from='%s' to='%s' relative_path='%s'", from_prefix, to_prefix, relative_path)
+    from_path = os.path.join(from_prefix, relative_path)
+    to_path = os.path.join(to_prefix, relative_path)
+    if(os.path.islink(from_path)):
+      link_target = os.path.realpath(from_path)
+      if(os.path.realpath(from_path).startswith(from_prefix)): # if link is inside from_prefix
+        link_target = os.path.join(to_prefix, os.path.relpath(link_target, from_prefix)) # set new link target inside to_prefix
+      logger.info("lazysync::action_cp() relative_path is symlink, ln -s target='%s' to='%s'", link_target, to_path)
+      if(os.path.lexists(to_path)):
+        if to_prefix == self.config['remote']:
+          self.action_rm_remote(relative_path)
+        else:
+          self.action_rm_local(relative_path)
+      os.symlink(link_target, to_path)
+    elif(os.path.isdir(from_path)):
+      logger.info("lazysync::action_cp() relative_path is dir, mkdir to='%s'", to_path)
+      os.makedirs(to_path)
+      shutil.copystat(from_path, to_path)
     else:
-      logger.info("lazysync::action_cp_local() relative_path is file, cp local='%s' remote='%s'", path_local, 
-                   path_remote)
-      if os.path.lexists(path_remote): # remove an old file it it exists
-        self.action_rm_remote(relative_path)
-      shutil.copy2(path_local, path_remote) # copy new file
-      last_backup_file_data = self.get_last_backup_file_data(path_remote) # get last backed up version
-      if last_backup_file_data is not None and filecmp.cmp(path_remote, last_backup_file_data.path, shallow = False):
-        logger.info("lazysync::action_cp_local() files remote='%s' and remote_backup='%s' are identical, not keeping remote_backup", 
-                    path_remote, last_backup_file_data.path)
-        self.remove_backup_file(path_remote, last_backup_file_data) # remove the previous version
+      logger.info("lazysync::action_cp() relative_path is file, cp from='%s' to='%s'", from_path, to_path)
+      if os.path.lexists(to_path): # remove an old file it it exists
+        if to_prefix == self.config['remote']:
+          self.action_rm_remote(relative_path)
+        else:
+          self.action_rm_local(relative_path)
+      shutil.copy2(from_path, to_path)
+      last_backup_file_data = self.get_last_backup_file_data(to_path) # get last backed up version
+      if last_backup_file_data is not None and filecmp.cmp(to_path, last_backup_file_data.path, shallow = False):
+        logger.info("lazysync::action_cp() files to='%s' and to_backup='%s' are identical, not keeping to_backup", 
+                    to_path, last_backup_file_data.path)
+        self.remove_backup_file(to_path, last_backup_file_data) # remove the previous version
 
     self.update_file_tracking(relative_path)
 
   #
+  def action_cp_local(self, relative_path):
+    logger.debug("lazysync::action_cp_local() relative_path='%s'", relative_path)
+    self.action_cp(self.config['local'], self.config['remote'], relative_path)
+
+  #
   def action_cp_remote(self, relative_path):
     logger.debug("lazysync::action_cp_remote() relative_path='%s'", relative_path)
-    path_remote = os.path.join(self.config['remote'], relative_path)
-    path_local = os.path.join(self.config['local'], relative_path)
-
-    if(os.path.islink(path_remote)):
-      link_target = os.path.realpath(path_remote)
-      if(os.path.realpath(path_remote).startswith(self.config['remote'])):
-        link_target = os.path.join(self.config['local'], os.path.relpath(link_target, self.config['remote']))
-      logger.info("lazysync::action_cp_remote() relative_path is symlink, ln -s target='%s' local='%s'", link_target, 
-                  path_local)
-      if(os.path.lexists(path_local)):
-        self.action_rm_local(relative_path)
-      os.symlink(link_target, path_local)
-    elif(os.path.isdir(path_remote)):
-      logger.info("lazysync::action_cp_remote() relative_path is dir, mkdir local='%s'", path_local)
-      if(not os.path.lexists(path_local)): # only create the path is it does not exist (could be created with a subdir)
-        os.makedirs(path_local)
-      shutil.copystat(path_remote, path_local)
-    else:
-      logger.info("lazysync::action_cp_remote() relative_path is file, cp remote='%s' local='%s'", path_remote, 
-                  path_local)
-      if os.path.lexists(path_local): # remove an old file it it exists
-        self.action_rm_local(relative_path)
-      shutil.copy2(path_remote, path_local) # copy new file
-      last_backup_file_data = self.get_last_backup_file_data(path_local) # get last backed up version
-      if last_backup_file_data is not None and filecmp.cmp(path_local, last_backup_file_data.path, shallow = False):
-        logger.info("lazysync::action_cp_remote() files local='%s' and local_backup='%s' are identical, not keeping local_backup", 
-                    path_local, last_backup_file_data.path)
-        self.remove_backup_file(path_local, last_backup_file_data) # remove the previous version
-      
-    self.update_file_tracking(relative_path)
+    self.action_cp(self.config['remote'], self.config['local'], relative_path)
     
   #
   def action_ln_remote(self, relative_path):
