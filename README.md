@@ -35,13 +35,12 @@ optional arguments:
 
 ## Status
 
-* Syncing works for folders and files.
-* Files are not directly deleted, but versioned and kept until manually deleted.
+* Syncing works for folders, files and symlinks.
+* Files are not directly deleted, but versioned and kept until manually deleted. 
 * Sync is automatically paused if paths are not yet mounted on start, or are unmounted during its run.
 * Problems:
   * Relative symlinks `local` -> `remote` are not updated. (LazySync creates symlinks with absolute paths.)
-  * If `remote` is accessed by anybody or anything else, it will mistakenly be counted as own access and cause a file 
-    download.
+  * A file access can be missed and the file won't be downloaded if the access/open time is too short to be detected.
 * To Do:
   * Better logging levels and user adjustable logging.
   * Make sleep time user adjustable.
@@ -59,7 +58,11 @@ optional arguments:
 * Syncing lazily works by creating symlinks in the `local` folder that point to the corresponding file in 
   the `remote` folder. This avoids downloading files whose content is not needed (yet).
 * If a file is read, it is downloaded, the symlink is replaced with a copy of the file contents. That a file is read is
-  determined by an updated atime of the remote file. (This means reading a file can be faked by `touch`ing the file.)
+  determined by checking the Linux kernel's list of open files.
+* This assumes that the remote file is cached locally once it is downloaded and not downloaded again. This is true for 
+  davfs2.
+* A file that is opened and read can be missed if the open time is too short to be detected. If the file access is 
+  missed, the file won't be downloaded.
 * The local copy of the file is kept until a change to the `remote` file occurs, at which point the `local` copy is 
   replaced by a symlink.
 
@@ -72,12 +75,18 @@ optional arguments:
   following actions are implemented:
   
   * Change to files (dirs)
-    location\event     create              mtime                 atime                   delete
-    * `remote`         symlink (mkdir)     symlink (ignored)     download (ignored)      remove (rmdir)
-    * `local`          upload (mkdir)      upload  (ignored)     ignored (ignored)       remove (rmdir)
+    location\event     create              mtime                                   atime                 delete
+    * `remote`         symlink (mkdir)     lazy:symlink/non:download (ignored)     ignored (ignored)     remove (rmdir)
+    * `local`          upload (mkdir)      upload  (ignored)                       ignored (ignored)     remove (rmdir)
   * Creation and deletion of files and dirs is assumed based on the previous tracking information
     * If path existed before (last scan): assume path was deleted
     * If path did not exist before: assume new file
+  * In lazy mode, a symlink is replaced with a local copy (download), if the file was accessed (detected as open with 
+    ofnotify).
+  
+* User symlinks are synced.
+  * A user symlink is any symlink that is not a symlink `local` -> `remote`.
+  * If a symlink's target is outside `remote` or `local`, they will appear as dead.
   
 * Box/webdav
   * When syncing files local to `remote`, the `remote` mtime will be what it was synced to based on the 
