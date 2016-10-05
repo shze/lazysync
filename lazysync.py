@@ -7,7 +7,7 @@ import jsonpickle, subprocess, ofnotify, enum # enum is enum34
 
 # global variables
 sigint = False # variable to check for sigint
-min_sleep = 1.9 # seconds
+min_sleep = 2.8 # seconds
 app_identifier = "lazysync" # used for all paths
 relative_backup_dir = '.%s' % (app_identifier) # to store old files for specific sync paths
 data_file = 'data' # to store the information about the different backup files
@@ -455,7 +455,7 @@ class lazysync(ofnotify.event_processor):
       os.symlink(link_target, to_path)
     elif(os.path.isdir(from_path)):
       logger.info("lazysync::action_cp() relative_path is dir, mkdir to='%s'", to_path)
-      os.makedirs(to_path)
+      make_sure_path_exists(to_path)
       shutil.copystat(from_path, to_path)
     else:
       logger.info("lazysync::action_cp() relative_path is file, cp from='%s' to='%s'", from_path, to_path)
@@ -564,8 +564,6 @@ class lazysync(ofnotify.event_processor):
   def loop(self):
     logger.trace("lazysync::loop()")
     global sigint
-    print_update_threshold = 15 // min_sleep
-    update_count = print_update_threshold - 1
     remote_backup_dir = os.path.join(self.config['remote'], relative_backup_dir)
     local_backup_dir = os.path.join(self.config['local'], relative_backup_dir)
     while(not sigint):
@@ -574,19 +572,18 @@ class lazysync(ofnotify.event_processor):
       start_time = timeit.default_timer()
       
       logger.trace("lazysync::loop() self.files.path=%s", self.files.keys())
-      if(not self.queue and self.sleep_time == 0): # check filesystem if queue is empty and waiting time is up
+      only_sleeping = not self.queue and self.sleep_time > 0 # save if we only sleep this round
+      if(self.sleep_time == 0): # check filesystem if waiting time is up
         self.find_changes()
-        update_count += 1
       if(self.queue): # process any changes that are left
         self.process_next_change()
-        update_count = print_update_threshold
         
       duration = timeit.default_timer() -  start_time
       logger.debug("lazysync::loop() duration=%f", duration)
       self.sleep_time += duration
 
       if(not self.queue and self.sleep_time > 0): # sleep to avoid 100% cpu load; a small delay is tolerable to quit 
-        level = logging.INFO if(duration > min_sleep or update_count % print_update_threshold == 0) else logging.DEBUG
+        level = logging.DEBUG if(only_sleeping) else logging.INFO
         logger.log(level, "lazysync::loop() sleep with sleep_time=%f", self.sleep_time)
         time.sleep(min_sleep) # sleep fixed time to pace polling if duration is very short
         self.sleep_time = max(0, self.sleep_time - min_sleep)
