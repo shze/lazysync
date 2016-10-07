@@ -161,3 +161,8 @@ if __name__ == "__main__":
       n.stop()
       raise
 ```
+
+### Code Formatting
+
+[PEP 8](https://www.python.org/dev/peps/pep-0008/) is used. `autopep8 -a --ignore=E301 -` on Debian 8 to avoid 
+[blank lines before a class docstring](https://github.com/hhatto/autopep8/issues/194).
